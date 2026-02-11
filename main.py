@@ -1,6 +1,7 @@
 import os
 import asyncio
 import asyncpg
+from datetime import datetime, timedelta
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -19,10 +20,12 @@ ADMIN_ID = 963261169
 
 db = None
 waiting_for_broadcast = False
-waiting_for_funnel = False
+waiting_for_schedule_text = False
+temp_schedule_text = None
 
 
-# ---------------- БАЗА ----------------
+# ================= БАЗА =================
+
 async def init_db(app):
     global db
     db = await asyncpg.connect(DATABASE_URL)
@@ -35,10 +38,9 @@ async def init_db(app):
     """)
 
     await db.execute("""
-        CREATE TABLE IF NOT EXISTS funnel_steps (
+        CREATE TABLE IF NOT EXISTS scheduled_broadcasts (
             id SERIAL PRIMARY KEY,
-            step_number INTEGER,
-            delay_seconds INTEGER,
+            send_time TIMESTAMP,
             message TEXT
         )
     """)
@@ -57,121 +59,213 @@ async def get_all_users():
     return [row["user_id"] for row in rows]
 
 
-# ---------------- АВТОВОРОНКА ----------------
-async def start_funnel(user_id, context):
-    rows = await db.fetch("""
-        SELECT step_number, delay_seconds, message
-        FROM funnel_steps
-        ORDER BY step_number
+async def get_users_count():
+    row = await db.fetchrow("SELECT COUNT(*) FROM users")
+    return row["count"]
+
+
+async def get_new_users_24h():
+    row = await db.fetchrow("""
+        SELECT COUNT(*) FROM users
+        WHERE joined_at >= NOW() - INTERVAL '24 HOURS'
     """)
-
-    for row in rows:
-        await asyncio.sleep(row["delay_seconds"])
-        try:
-            await context.bot.send_message(user_id, row["message"])
-        except:
-            pass
+    return row["count"]
 
 
-# ---------------- СТАРТ ----------------
+# ================= ПРОВЕРКА ПОДПИСКИ =================
+
+async def check_subscription(user_id, context):
+    try:
+        member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except:
+        return False
+
+
+# ================= СТАРТ =================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await save_user(user_id)
 
-    await update.message.reply_text("Добро пожаловать 🔥")
-    asyncio.create_task(start_funnel(user_id, context))
+    is_subscribed = await check_subscription(user_id, context)
+
+    if is_subscribed:
+        await update.message.reply_text("ТЫ В БАНДЕ 🔥")
+    else:
+        keyboard = [
+            [InlineKeyboardButton(
+                "Подпишись уже, мы же там инфу кидаем))",
+                url=f"https://t.me/{CHANNEL_USERNAME[1:]}"
+            )],
+            [InlineKeyboardButton("✅ Давай проверим", callback_data="check_sub")]
+        ]
+
+        await update.message.reply_text(
+            "❌ Давай подписывайся, я все вижу)",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
-# ---------------- АДМИН ПАНЕЛЬ ----------------
+# ================= АДМИН ПАНЕЛЬ =================
+
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
     keyboard = [
-        [InlineKeyboardButton("➕ Добавить шаг", callback_data="add_step")],
-        [InlineKeyboardButton("📋 Показать шаги", callback_data="show_steps")],
-        [InlineKeyboardButton("❌ Очистить воронку", callback_data="clear_funnel")],
+        [InlineKeyboardButton("📢 Мгновенная рассылка", callback_data="broadcast")],
+        [InlineKeyboardButton("📅 Запланировать рассылку", callback_data="schedule")],
     ]
 
     await update.message.reply_text(
-        "⚙ Управление автоворонкой",
+        "⚙ Админ панель",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-# ---------------- КНОПКИ ----------------
+# ================= СТАТИСТИКА =================
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    total = await get_users_count()
+    new_24h = await get_new_users_24h()
+
+    await update.message.reply_text(
+        f"📊 Статистика:\n\n"
+        f"👥 Всего пользователей: {total}\n"
+        f"🆕 Новых за 24 часа: {new_24h}"
+    )
+
+
+# ================= JOB РАССЫЛКИ =================
+
+async def broadcast_job(context: ContextTypes.DEFAULT_TYPE):
+    message = context.job.data
+    users = await get_all_users()
+
+    for uid in users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=message)
+            await asyncio.sleep(0.05)
+        except:
+            pass
+
+
+# ================= КНОПКИ =================
+
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_funnel
+    global waiting_for_broadcast
+    global waiting_for_schedule_text
+    global temp_schedule_text
 
     query = update.callback_query
     await query.answer()
+    user_id = query.from_user.id
 
-    if query.from_user.id != ADMIN_ID:
+    if query.data == "check_sub":
+        is_subscribed = await check_subscription(user_id, context)
+
+        if is_subscribed:
+            await query.edit_message_text("✅ Ну все, тусим! 🚀")
+        else:
+            await query.answer("❌ Так че, тусим то будем?", show_alert=True)
+
+    if user_id != ADMIN_ID:
         return
 
-    if query.data == "add_step":
-        waiting_for_funnel = True
-        await query.message.reply_text(
-            "Отправь шаг в формате:\n\n"
-            "номер_шага | задержка_в_секундах | текст\n\n"
-            "Пример:\n"
-            "1 | 10 | Привет, это первое сообщение"
+    if query.data == "broadcast":
+        waiting_for_broadcast = True
+        await query.message.reply_text("✍ Напиши текст для мгновенной рассылки")
+
+    if query.data == "schedule":
+        waiting_for_schedule_text = True
+        await query.message.reply_text("✍ Отправь текст для отложенной рассылки")
+
+    if query.data.startswith("delay_"):
+        delay_map = {
+            "delay_1h": 3600,
+            "delay_6h": 21600,
+            "delay_12h": 43200,
+            "delay_24h": 86400,
+        }
+
+        delay = delay_map.get(query.data)
+        send_time = datetime.utcnow() + timedelta(seconds=delay)
+
+        await db.execute("""
+            INSERT INTO scheduled_broadcasts (send_time, message)
+            VALUES ($1, $2)
+        """, send_time, temp_schedule_text)
+
+        context.application.job_queue.run_once(
+            broadcast_job,
+            delay,
+            data=temp_schedule_text
         )
 
-    elif query.data == "show_steps":
-        rows = await db.fetch("""
-            SELECT step_number, delay_seconds, message
-            FROM funnel_steps
-            ORDER BY step_number
-        """)
+        await query.message.reply_text(
+            f"✅ Рассылка запланирована через {delay // 3600} ч."
+        )
 
-        if not rows:
-            await query.message.reply_text("Воронка пустая")
-            return
-
-        text = "📋 Текущие шаги:\n\n"
-        for row in rows:
-            text += f"Шаг {row['step_number']} | {row['delay_seconds']} сек\n{row['message']}\n\n"
-
-        await query.message.reply_text(text)
-
-    elif query.data == "clear_funnel":
-        await db.execute("DELETE FROM funnel_steps")
-        await query.message.reply_text("❌ Воронка очищена")
+        waiting_for_schedule_text = False
+        temp_schedule_text = None
 
 
-# ---------------- ОБРАБОТКА ТЕКСТА ----------------
+# ================= ОБРАБОТКА ТЕКСТА =================
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_funnel
+    global waiting_for_broadcast
+    global waiting_for_schedule_text
+    global temp_schedule_text
 
     user_id = update.effective_user.id
+    await save_user(user_id)
 
-    if user_id == ADMIN_ID and waiting_for_funnel:
-        try:
-            step, delay, message = update.message.text.split("|", 2)
-
-            step = int(step.strip())
-            delay = int(delay.strip())
-            message = message.strip()
-
-            await db.execute("""
-                INSERT INTO funnel_steps (step_number, delay_seconds, message)
-                VALUES ($1, $2, $3)
-            """, step, delay, message)
-
-            await update.message.reply_text("✅ Шаг добавлен")
-            waiting_for_funnel = False
-
-        except:
-            await update.message.reply_text("❌ Неверный формат. Попробуй ещё раз.")
+    if user_id != ADMIN_ID:
         return
 
+    if waiting_for_broadcast:
+        waiting_for_broadcast = False
+        text = update.message.text
+        users = await get_all_users()
 
-# ---------------- ЗАПУСК ----------------
+        await update.message.reply_text("📢 Начинаю рассылку...")
+
+        for uid in users:
+            try:
+                await context.bot.send_message(chat_id=uid, text=text)
+                await asyncio.sleep(0.05)
+            except:
+                pass
+
+        await update.message.reply_text("✅ Рассылка завершена")
+
+    elif waiting_for_schedule_text:
+        temp_schedule_text = update.message.text
+
+        keyboard = [
+            [InlineKeyboardButton("⏰ Через 1 час", callback_data="delay_1h")],
+            [InlineKeyboardButton("⏰ Через 6 часов", callback_data="delay_6h")],
+            [InlineKeyboardButton("⏰ Через 12 часов", callback_data="delay_12h")],
+            [InlineKeyboardButton("📅 Через 1 день", callback_data="delay_24h")],
+        ]
+
+        await update.message.reply_text(
+            "⏳ Когда отправить?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+# ================= ЗАПУСК =================
+
 app = ApplicationBuilder().token(TOKEN).post_init(init_db).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
+app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
