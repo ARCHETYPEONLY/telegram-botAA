@@ -1,7 +1,8 @@
 import os
 import asyncio
 import asyncpg
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 
 from telegram import (
     Update,
@@ -24,7 +25,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
 ADMIN_ID = 963261169
-CHANNEL_USERNAME = "@ECLIPSEPARTY1"  # <-- ЗАМЕНИ
+CHANNEL_USERNAME = "@username_твоего_канала"  # <-- ЗАМЕНИ
 
 # ================= GLOBALS =================
 
@@ -38,12 +39,18 @@ scheduled_content = None
 
 waiting_for_name = {}
 
+# ================= LOGGING =================
+
+# Настройка логирования
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 # ================= DATABASE =================
 
 async def init_db(app):
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
-    print("✅ Database connected")
+    logger.debug("✅ Database connected")
 
     async with db_pool.acquire() as conn:
 
@@ -97,6 +104,7 @@ async def restore_jobs(app):
             scheduled_jobs[row["id"]] = job
 
 async def save_user(user):
+    logger.debug(f"Saving user: {user.id}")
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO users (user_id, username)
@@ -114,9 +122,11 @@ async def get_all_users():
 
 async def check_subscription(user_id, context):
     try:
+        logger.debug(f"Checking subscription for user {user_id}.")
         member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
         return member.status in ["member", "administrator", "creator"]
-    except:
+    except Exception as e:
+        logger.error(f"Error checking subscription: {e}")
         return False
 
 # ================= START =================
@@ -124,6 +134,8 @@ async def check_subscription(user_id, context):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await save_user(user)
+
+    logger.debug(f"User {user.id} started the bot.")
 
     waiting_for_name[user.id] = True
 
@@ -157,6 +169,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    logger.debug(f"Button pressed: {query.data} by {query.from_user.id}")
+
     if query.data == "check_sub":
         is_subscribed = await check_subscription(query.from_user.id, context)
 
@@ -168,7 +182,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.edit_text(
             "🔥 Ты в списке!\n\n"
-            "Вся информация про наши тусовки будет в канале 😉"
+            "Вся информация будет в канале 😉"
         )
         return
 
@@ -225,6 +239,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Подпишись на канал и нажми проверить 👇",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
         return
 
     # ===== АДМИН =====
