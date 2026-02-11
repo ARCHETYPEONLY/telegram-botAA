@@ -44,6 +44,8 @@ async def init_db(app):
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
                 joined_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -59,35 +61,10 @@ async def init_db(app):
             )
         """)
 
-        # ===== AUTO MIGRATION =====
+        # добавляем колонку file_type если её нет
         await conn.execute("""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='scheduled_messages'
-                    AND column_name='file_id'
-                ) THEN
-                    ALTER TABLE scheduled_messages ADD COLUMN file_id TEXT;
-                END IF;
-
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='scheduled_messages'
-                    AND column_name='file_type'
-                ) THEN
-                    ALTER TABLE scheduled_messages ADD COLUMN file_type TEXT;
-                END IF;
-
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='scheduled_messages'
-                    AND column_name='status'
-                ) THEN
-                    ALTER TABLE scheduled_messages ADD COLUMN status TEXT DEFAULT 'scheduled';
-                END IF;
-            END
-            $$;
+            ALTER TABLE scheduled_messages
+            ADD COLUMN IF NOT EXISTS file_type TEXT
         """)
 
     await restore_jobs(app)
@@ -113,13 +90,16 @@ async def restore_jobs(app):
             scheduled_jobs[row["id"]] = job
 
 
-async def save_user(user_id: int):
+async def save_user(user):
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO users (user_id)
-            VALUES ($1)
-            ON CONFLICT DO NOTHING
-        """, user_id)
+            INSERT INTO users (user_id, username, first_name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                username = EXCLUDED.username,
+                first_name = EXCLUDED.first_name
+        """, user.id, user.username, user.first_name)
 
 
 async def get_all_users():
@@ -131,7 +111,7 @@ async def get_all_users():
 # ================= USER =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await save_user(update.effective_user.id)
+    await save_user(update.effective_user)
     await update.message.reply_text("🚀 Бот работает")
 
 
@@ -180,52 +160,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "list":
         await show_schedules(query)
 
-    elif query.data.startswith("delete_"):
-        message_id = int(query.data.split("_")[1])
-
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM scheduled_messages WHERE id=$1",
-                message_id
-            )
-
-        job = scheduled_jobs.get(message_id)
-        if job:
-            job.schedule_removal()
-            scheduled_jobs.pop(message_id, None)
-
-        await query.message.edit_text("❌ Удалено")
-
-
-# ================= LIST =================
-
-async def show_schedules(query):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT * FROM scheduled_messages
-            WHERE status='scheduled'
-            ORDER BY send_time
-        """)
-
-    if not rows:
-        await query.message.reply_text("📭 Нет рассылок")
-        return
-
-    for row in rows:
-        keyboard = [[
-            InlineKeyboardButton(
-                "❌ Удалить",
-                callback_data=f"delete_{row['id']}"
-            )
-        ]]
-
-        await query.message.reply_text(
-            f"🆔 ID: {row['id']}\n"
-            f"🕒 {row['send_time'].strftime('%d.%m.%Y %H:%M')}\n"
-            f"📦 Тип: {row['file_type'] or 'text'}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
 
 # ================= MESSAGES =================
 
@@ -235,19 +169,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_schedule_time
     global scheduled_content
 
-    user_id = update.effective_user.id
-    await save_user(user_id)
+    user = update.effective_user
+    message = update.message
 
-    if user_id != ADMIN_ID:
+    await save_user(user)
+
+    # ===== ЕСЛИ ПИШЕТ ПОЛЬЗОВАТЕЛЬ =====
+    if user.id != ADMIN_ID:
+        try:
+            info = (
+                f"📩 Новое сообщение\n\n"
+                f"👤 ID: {user.id}\n"
+                f"📛 Username: @{user.username}\n"
+            )
+
+            await context.bot.send_message(ADMIN_ID, info)
+
+            forwarded = await context.bot.forward_message(
+                chat_id=ADMIN_ID,
+                from_chat_id=update.effective_chat.id,
+                message_id=message.message_id
+            )
+
+            context.bot_data[forwarded.message_id] = user.id
+
+        except:
+            pass
         return
 
-    message = update.message
+    # ===== ОТВЕТ РЕПЛАЕМ =====
+    if user.id == ADMIN_ID and message.reply_to_message:
+        replied_msg_id = message.reply_to_message.message_id
+
+        if replied_msg_id in context.bot_data:
+            target_user_id = context.bot_data[replied_msg_id]
+
+            try:
+                await context.bot.send_message(
+                    target_user_id,
+                    message.text
+                )
+                await message.reply_text("✅ Ответ отправлен")
+            except:
+                await message.reply_text("❌ Ошибка отправки")
+
+        return
+
+    # ===== BROADCAST =====
 
     if waiting_for_broadcast:
         waiting_for_broadcast = False
         await broadcast_content(context, message)
         await message.reply_text("✅ Рассылка завершена")
         return
+
+    # ===== SCHEDULE STEP 1 =====
 
     if waiting_for_schedule_text:
         scheduled_content = extract_content(message)
@@ -256,12 +232,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("🕒 Введи дату: 11.02.2026 21:40")
         return
 
+    # ===== SCHEDULE STEP 2 =====
+
     if waiting_for_schedule_time:
         try:
             send_time = datetime.strptime(
                 message.text.strip(),
                 "%d.%m.%Y %H:%M"
             )
+
+            send_time = send_time.replace(tzinfo=timezone.utc)
+
+            if send_time <= datetime.now(timezone.utc):
+                await message.reply_text("❌ Время уже прошло")
+                return
 
             waiting_for_schedule_time = False
 
@@ -279,7 +263,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             job = context.job_queue.run_once(
                 send_scheduled_broadcast,
-                when=send_time.replace(tzinfo=timezone.utc),
+                when=send_time,
                 data=dict(row),
                 name=str(row["id"])
             )
@@ -289,7 +273,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.reply_text("✅ Запланировано")
 
         except Exception as e:
-            await message.reply_text(f"❌ Ошибка планирования:\n{e}")
+            await message.reply_text(f"❌ Ошибка: {e}")
 
 
 # ================= CONTENT =================
@@ -336,15 +320,16 @@ async def broadcast_content(context, message):
 async def send_content(context, user_id, content):
     if content["file_type"] == "photo":
         await context.bot.send_photo(user_id, content["file_id"], caption=content["text"])
+
     elif content["file_type"] == "video":
         await context.bot.send_video(user_id, content["file_id"], caption=content["text"])
+
     elif content["file_type"] == "animation":
         await context.bot.send_animation(user_id, content["file_id"], caption=content["text"])
+
     else:
         await context.bot.send_message(user_id, content["text"])
 
-
-# ================= SCHEDULE SEND =================
 
 async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
@@ -363,10 +348,8 @@ async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
             data["id"]
         )
 
-    scheduled_jobs.pop(data["id"], None)
 
-
-# ================= RUN (WEBHOOK RAILWAY) =================
+# ================= WEBHOOK RUN =================
 
 app = (
     ApplicationBuilder()
@@ -385,10 +368,8 @@ print("🚀 Bot started (webhook mode)")
 PORT = int(os.environ.get("PORT", 8000))
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
-if not RAILWAY_URL:
-    raise RuntimeError("RAILWAY_STATIC_URL not set")
-
-WEBHOOK_URL = f"https://{RAILWAY_URL}/webhook"
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"https://{RAILWAY_URL}{WEBHOOK_PATH}"
 
 app.run_webhook(
     listen="0.0.0.0",
