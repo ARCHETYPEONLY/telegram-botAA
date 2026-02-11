@@ -389,6 +389,22 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ================= APP INIT =================
+
+app = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .post_init(init_db)
+    .build()
+)
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("admin", admin))
+app.add_handler(CommandHandler("stats", stats))
+app.add_handler(CallbackQueryHandler(button))
+app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+
+
 # ================= WEBHOOK RUN =================
 
 print("🚀 Bot started (webhook mode)")
@@ -406,4 +422,3 @@ app.run_webhook(
     port=PORT,
     webhook_url=WEBHOOK_URL,
 )
-
