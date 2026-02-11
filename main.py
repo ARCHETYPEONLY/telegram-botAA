@@ -36,6 +36,21 @@ async def init_db(app):
     """)
 
     await db.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT NOW()
+    """)
+
+    await db.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS funnel_step INTEGER DEFAULT 0
+    """)
+
+    await db.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS funnel_active BOOLEAN DEFAULT TRUE
+    """)
+
+    await db.execute("""
         CREATE TABLE IF NOT EXISTS funnel_steps (
             id SERIAL PRIMARY KEY,
             step_number INTEGER,
@@ -71,43 +86,6 @@ async def get_new_users_24h():
     return row["count"]
 
 
-# ---------------- АВТОВОРОНКА ----------------
-async def start_funnel(user_id):
-    global db
-
-    user = await db.fetchrow("""
-        SELECT funnel_step, funnel_active
-        FROM users
-        WHERE user_id = $1
-    """, user_id)
-
-    if not user or not user["funnel_active"]:
-        return
-
-    step = await db.fetchrow("""
-        SELECT * FROM funnel_steps
-        WHERE step_number = $1
-    """, user["funnel_step"])
-
-    if not step:
-        return
-
-    await asyncio.sleep(step["delay_seconds"])
-
-    try:
-        await app.bot.send_message(user_id, step["message"])
-    except:
-        return
-
-    await db.execute("""
-        UPDATE users
-        SET funnel_step = funnel_step + 1
-        WHERE user_id = $1
-    """, user_id)
-
-    asyncio.create_task(start_funnel(user_id))
-
-
 # ---------------- ПРОВЕРКА ПОДПИСКИ ----------------
 async def check_subscription(user_id, context):
     try:
@@ -117,28 +95,38 @@ async def check_subscription(user_id, context):
         return False
 
 
+# ---------------- АВТОВОРОНКА ----------------
+async def start_funnel(user_id, context):
+    rows = await db.fetch("""
+        SELECT step_number, delay_seconds, message
+        FROM funnel_steps
+        ORDER BY step_number
+    """)
+
+    for row in rows:
+        await asyncio.sleep(row["delay_seconds"])
+        try:
+            await context.bot.send_message(user_id, row["message"])
+        except:
+            pass
+
+
 # ---------------- СТАРТ ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     await save_user(user_id)
-
-    await db.execute("""
-        UPDATE users
-        SET funnel_step = 0, funnel_active = TRUE
-        WHERE user_id = $1
-    """, user_id)
-
-    asyncio.create_task(start_funnel(user_id))
 
     is_subscribed = await check_subscription(user_id, context)
 
     if is_subscribed:
         await update.message.reply_text("ТЫ В БАНДЕ 🔥")
+        asyncio.create_task(start_funnel(user_id, context))
     else:
         keyboard = [
-            [InlineKeyboardButton("Подпишись уже, мы же там инфу кидаем))",
-                                  url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
+            [InlineKeyboardButton(
+                "Подпишись уже, мы же там инфу кидаем))",
+                url=f"https://t.me/{CHANNEL_USERNAME[1:]}"
+            )],
             [InlineKeyboardButton("✅ Давай проверим", callback_data="check_sub")]
         ]
 
@@ -148,7 +136,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ---------------- АДМИН ----------------
+# ---------------- СТАТИСТИКА ----------------
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    total = await get_users_count()
+    new_24h = await get_new_users_24h()
+
+    await update.message.reply_text(
+        f"📊 Статистика:\n\n"
+        f"👥 Всего: {total}\n"
+        f"🆕 Новых за 24 часа: {new_24h}"
+    )
+
+
+# ---------------- РАССЫЛКА ----------------
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -163,44 +166,26 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ---------------- СТАТИСТИКА ----------------
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    total = await get_users_count()
-    new_24h = await get_new_users_24h()
-
-    await update.message.reply_text(
-        f"📊 Статистика:\n\n"
-        f"👥 Всего пользователей: {total}\n"
-        f"🆕 Новых за 24 часа: {new_24h}"
-    )
-
-
-# ---------------- КНОПКИ ----------------
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_broadcast
 
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
-
     if query.data == "check_sub":
-        is_subscribed = await check_subscription(user_id, context)
+        is_subscribed = await check_subscription(query.from_user.id, context)
 
         if is_subscribed:
             await query.edit_message_text("✅ Ну все, тусим! 🚀")
+            asyncio.create_task(start_funnel(query.from_user.id, context))
         else:
             await query.answer("❌ Так че, тусим то будем?", show_alert=True)
 
-    if query.data == "broadcast" and user_id == ADMIN_ID:
+    if query.data == "broadcast" and query.from_user.id == ADMIN_ID:
         waiting_for_broadcast = True
         await query.message.reply_text("✍ Напиши текст для рассылки")
 
 
-# ---------------- ТЕКСТ ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_broadcast
 
@@ -217,7 +202,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for uid in users:
             try:
-                await context.bot.send_message(chat_id=uid, text=text)
+                await context.bot.send_message(uid, text)
                 await asyncio.sleep(0.05)
             except:
                 pass
