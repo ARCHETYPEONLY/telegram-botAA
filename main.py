@@ -36,6 +36,9 @@ scheduled_text = None
 async def init_db(app):
     global db_pool
 
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL не найден")
+
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     print("✅ Database connected")
 
@@ -71,22 +74,12 @@ async def get_all_users():
         return [row["user_id"] for row in rows]
 
 
-async def get_scheduled():
+async def delete_scheduled(message_id: int):
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT id, text, send_time 
-            FROM scheduled_messages
-            ORDER BY send_time
-        """)
-        return rows
-
-
-async def delete_scheduled(message_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            DELETE FROM scheduled_messages
-            WHERE id = $1
-        """, message_id)
+        await conn.execute(
+            "DELETE FROM scheduled_messages WHERE id = $1",
+            message_id
+        )
 
 
 # ================= USER =================
@@ -96,7 +89,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚀 Бот работает")
 
 
-# ================= ADMIN =================
+# ================= ADMIN PANEL =================
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -105,7 +98,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📢 Сделать рассылку", callback_data="broadcast")],
         [InlineKeyboardButton("🕒 Запланировать рассылку", callback_data="schedule")],
-        [InlineKeyboardButton("📋 Список рассылок", callback_data="list_scheduled")]
+        [InlineKeyboardButton("📋 Список рассылок", callback_data="list")]
     ]
 
     await update.message.reply_text(
@@ -132,37 +125,27 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_for_schedule_text = True
         await query.message.reply_text("✍ Напиши текст для запланированной рассылки")
 
-    elif query.data == "list_scheduled":
-        rows = await get_scheduled()
+    elif query.data == "list":
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, text, send_time
+                FROM scheduled_messages
+                ORDER BY send_time
+            """)
 
         if not rows:
-            await query.message.reply_text("📭 Запланированных рассылок нет")
+            await query.message.reply_text("📭 Нет запланированных рассылок")
             return
 
-        moscow = pytz.timezone("Europe/Moscow")
-
+        text = "📋 Запланированные рассылки:\n\n"
         for row in rows:
-            send_time_utc = row["send_time"].replace(tzinfo=pytz.utc)
-            send_time_msk = send_time_utc.astimezone(moscow)
-
-            keyboard = [[
-                InlineKeyboardButton(
-                    "❌ Удалить",
-                    callback_data=f"delete_{row['id']}"
-                )
-            ]]
-
-            await query.message.reply_text(
-                f"🆔 ID: {row['id']}\n"
-                f"🕒 {send_time_msk.strftime('%d.%m.%Y %H:%M')} (МСК)\n\n"
-                f"{row['text']}",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+            text += (
+                f"ID: {row['id']}\n"
+                f"Дата: {row['send_time']}\n"
+                f"Текст: {row['text'][:30]}...\n\n"
             )
 
-    elif query.data.startswith("delete_"):
-        message_id = int(query.data.split("_")[1])
-        await delete_scheduled(message_id)
-        await query.message.reply_text("🗑 Рассылка удалена")
+        await query.message.reply_text(text)
 
 
 # ================= MESSAGES =================
@@ -176,7 +159,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await save_user(user_id)
 
-    # ОБЫЧНАЯ РАССЫЛКА
+    # Мгновенная рассылка
     if user_id == ADMIN_ID and waiting_for_broadcast:
         waiting_for_broadcast = False
         text = update.message.text
@@ -194,7 +177,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Рассылка завершена")
         return
 
-    # ШАГ 1 — текст
+    # Шаг 1
     if user_id == ADMIN_ID and waiting_for_schedule_text:
         scheduled_text = update.message.text
         waiting_for_schedule_text = False
@@ -202,16 +185,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(
             "🕒 Введи дату и время по МСК:\n\n"
-            "11.02.2026 19:30"
+            "11.02.2026 17:52"
         )
         return
 
-    # ШАГ 2 — дата
+    # Шаг 2
     if user_id == ADMIN_ID and waiting_for_schedule_time:
         try:
+            user_input = update.message.text.strip()
+
             moscow = pytz.timezone("Europe/Moscow")
-            send_time_naive = datetime.strptime(update.message.text.strip(), "%d.%m.%Y %H:%M")
-            send_time_msk = moscow.localize(send_time_naive)
+            send_time = datetime.strptime(user_input, "%d.%m.%Y %H:%M")
+            send_time_msk = moscow.localize(send_time)
 
             send_time_utc = send_time_msk.astimezone(pytz.utc)
             send_time_naive_utc = send_time_utc.replace(tzinfo=None)
@@ -219,32 +204,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             waiting_for_schedule_time = False
 
             async with db_pool.acquire() as conn:
-                await conn.execute("""
+                row = await conn.fetchrow("""
                     INSERT INTO scheduled_messages (text, send_time)
                     VALUES ($1, $2)
+                    RETURNING id
                 """, scheduled_text, send_time_naive_utc)
+
+                message_id = row["id"]
 
             context.job_queue.run_once(
                 send_scheduled_broadcast,
                 when=send_time_utc,
-                data=scheduled_text
+                data={
+                    "text": scheduled_text,
+                    "id": message_id
+                }
             )
 
             await update.message.reply_text(
-                f"✅ Рассылка запланирована на {update.message.text} (МСК)"
+                f"✅ Рассылка запланирована на {user_input} (МСК)"
             )
 
         except Exception as e:
             print("SCHEDULE ERROR:", e)
             await update.message.reply_text(
-                "❌ Неправильный формат.\nПример: 11.02.2026 19:30"
+                "❌ Неправильный формат.\nПример: 11.02.2026 17:52"
             )
 
 
-# ================= SCHEDULED SEND =================
+# ================= SEND =================
 
 async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
-    text = context.job.data
+    data = context.job.data
+    text = data["text"]
+    message_id = data["id"]
+
     users = await get_all_users()
 
     for uid in users:
@@ -253,6 +247,10 @@ async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.05)
         except:
             pass
+
+    await delete_scheduled(message_id)
+
+    print(f"✅ Рассылка {message_id} отправлена и удалена")
 
 
 # ================= RUN =================
@@ -269,5 +267,5 @@ app.add_handler(CommandHandler("admin", admin))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-print("Bot started")
+print("🚀 Bot started")
 app.run_polling()
