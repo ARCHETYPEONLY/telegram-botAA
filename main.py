@@ -24,8 +24,7 @@ waiting_for_schedule_text = False
 temp_schedule_text = None
 
 
-# ================= БАЗА =================
-
+# ================== БАЗА ==================
 async def init_db(app):
     global db
     db = await asyncpg.connect(DATABASE_URL)
@@ -72,8 +71,7 @@ async def get_new_users_24h():
     return row["count"]
 
 
-# ================= ПРОВЕРКА ПОДПИСКИ =================
-
+# ================== ПРОВЕРКА ПОДПИСКИ ==================
 async def check_subscription(user_id, context):
     try:
         member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
@@ -82,8 +80,7 @@ async def check_subscription(user_id, context):
         return False
 
 
-# ================= СТАРТ =================
-
+# ================== СТАРТ ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await save_user(user_id)
@@ -107,15 +104,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ================= АДМИН ПАНЕЛЬ =================
-
+# ================== АДМИН ПАНЕЛЬ ==================
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
     keyboard = [
-        [InlineKeyboardButton("📢 Мгновенная рассылка", callback_data="broadcast")],
-        [InlineKeyboardButton("📅 Запланировать рассылку", callback_data="schedule")],
+        [InlineKeyboardButton("📢 Сделать рассылку", callback_data="broadcast")],
+        [InlineKeyboardButton("⏳ Запланировать рассылку", callback_data="schedule")],
     ]
 
     await update.message.reply_text(
@@ -124,8 +120,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= СТАТИСТИКА =================
-
+# ================== СТАТИСТИКА ==================
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -140,22 +135,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= JOB РАССЫЛКИ =================
-
+# ================== JOB ==================
 async def broadcast_job(context: ContextTypes.DEFAULT_TYPE):
-    message = context.job.data
+    text = context.job.data
     users = await get_all_users()
 
     for uid in users:
         try:
-            await context.bot.send_message(chat_id=uid, text=message)
+            await context.bot.send_message(chat_id=uid, text=text)
             await asyncio.sleep(0.05)
         except:
             pass
 
 
-# ================= КНОПКИ =================
-
+# ================== КНОПКИ ==================
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_broadcast
     global waiting_for_schedule_text
@@ -165,6 +158,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
 
+    # Проверка подписки
     if query.data == "check_sub":
         is_subscribed = await check_subscription(user_id, context)
 
@@ -173,26 +167,27 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.answer("❌ Так че, тусим то будем?", show_alert=True)
 
-    if user_id != ADMIN_ID:
-        return
-
-    if query.data == "broadcast":
+    # Мгновенная рассылка
+    if query.data == "broadcast" and user_id == ADMIN_ID:
         waiting_for_broadcast = True
-        await query.message.reply_text("✍ Напиши текст для мгновенной рассылки")
+        await query.message.reply_text("✍ Напиши текст для рассылки")
 
-    if query.data == "schedule":
+    # Запланировать
+    if query.data == "schedule" and user_id == ADMIN_ID:
         waiting_for_schedule_text = True
-        await query.message.reply_text("✍ Отправь текст для отложенной рассылки")
+        await query.message.reply_text("✍ Напиши текст для отложенной рассылки")
 
-    if query.data.startswith("delay_"):
+    # Выбор времени
+    if query.data.startswith("delay_") and user_id == ADMIN_ID:
         delay_map = {
-            "delay_1h": 3600,
-            "delay_6h": 21600,
-            "delay_12h": 43200,
-            "delay_24h": 86400,
+            "delay_1h": (3600, "1 час"),
+            "delay_6h": (21600, "6 часов"),
+            "delay_12h": (43200, "12 часов"),
+            "delay_24h": (86400, "1 день"),
         }
 
-        delay = delay_map.get(query.data)
+        delay, text_time = delay_map.get(query.data)
+
         send_time = datetime.utcnow() + timedelta(seconds=delay)
 
         await db.execute("""
@@ -206,16 +201,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             data=temp_schedule_text
         )
 
+        formatted_time = send_time.strftime("%d.%m.%Y в %H:%M")
+
         await query.message.reply_text(
-            f"✅ Рассылка запланирована через {delay // 3600} ч."
+            f"🚀 Рассылка запланирована!\n"
+            f"🕒 Отправка через {text_time}\n"
+            f"📅 {formatted_time} (UTC)"
         )
 
         waiting_for_schedule_text = False
         temp_schedule_text = None
 
 
-# ================= ОБРАБОТКА ТЕКСТА =================
-
+# ================== ОБРАБОТКА ТЕКСТА ==================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_broadcast
     global waiting_for_schedule_text
@@ -224,12 +222,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await save_user(user_id)
 
-    if user_id != ADMIN_ID:
-        return
-
-    if waiting_for_broadcast:
+    # Мгновенная рассылка
+    if user_id == ADMIN_ID and waiting_for_broadcast:
         waiting_for_broadcast = False
         text = update.message.text
+
         users = await get_all_users()
 
         await update.message.reply_text("📢 Начинаю рассылку...")
@@ -243,14 +240,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("✅ Рассылка завершена")
 
-    elif waiting_for_schedule_text:
+    # Запланированная
+    elif user_id == ADMIN_ID and waiting_for_schedule_text:
         temp_schedule_text = update.message.text
 
         keyboard = [
-            [InlineKeyboardButton("⏰ Через 1 час", callback_data="delay_1h")],
-            [InlineKeyboardButton("⏰ Через 6 часов", callback_data="delay_6h")],
-            [InlineKeyboardButton("⏰ Через 12 часов", callback_data="delay_12h")],
-            [InlineKeyboardButton("📅 Через 1 день", callback_data="delay_24h")],
+            [InlineKeyboardButton("Через 1 час", callback_data="delay_1h")],
+            [InlineKeyboardButton("Через 6 часов", callback_data="delay_6h")],
+            [InlineKeyboardButton("Через 12 часов", callback_data="delay_12h")],
+            [InlineKeyboardButton("Через 1 день", callback_data="delay_24h")],
         ]
 
         await update.message.reply_text(
@@ -259,9 +257,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ================= ЗАПУСК =================
-
-app = ApplicationBuilder().token(TOKEN).post_init(init_db).build()
+# ================== ЗАПУСК ==================
+app = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .post_init(init_db)
+    .build()
+)
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
