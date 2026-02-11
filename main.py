@@ -20,7 +20,7 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-ADMIN_ID = 963261169
+SUPER_ADMIN = 963261169  # 👑 главный админ (никогда не удаляется)
 
 db_pool = None
 scheduled_jobs = {}
@@ -40,6 +40,8 @@ async def init_db(app):
     print("✅ Database connected")
 
     async with db_pool.acquire() as conn:
+
+        # Пользователи
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -47,6 +49,15 @@ async def init_db(app):
             )
         """)
 
+        # Админы
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS admins (
+                user_id BIGINT PRIMARY KEY,
+                added_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        # Запланированные рассылки
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id SERIAL PRIMARY KEY,
@@ -56,7 +67,7 @@ async def init_db(app):
             )
         """)
 
-        # Автомиграция если старой колонки нет
+        # Автомиграция status
         await conn.execute("""
             DO $$
             BEGIN
@@ -72,8 +83,32 @@ async def init_db(app):
             $$;
         """)
 
+        # Добавляем главного админа если его нет
+        await conn.execute("""
+            INSERT INTO admins (user_id)
+            VALUES ($1)
+            ON CONFLICT (user_id) DO NOTHING
+        """, SUPER_ADMIN)
+
     await restore_jobs(app)
 
+
+# ================= ADMIN CHECK =================
+
+async def is_admin(user_id: int) -> bool:
+    async with db_pool.acquire() as conn:
+        admin = await conn.fetchval(
+            "SELECT user_id FROM admins WHERE user_id=$1",
+            user_id
+        )
+        return admin is not None
+
+
+async def is_super_admin(user_id: int) -> bool:
+    return user_id == SUPER_ADMIN
+
+
+# ================= RESTORE JOBS =================
 
 async def restore_jobs(app):
     async with db_pool.acquire() as conn:
@@ -98,6 +133,8 @@ async def restore_jobs(app):
             )
             scheduled_jobs[row["id"]] = job
 
+
+# ================= USERS =================
 
 async def save_user(user_id: int):
     async with db_pool.acquire() as conn:
@@ -124,7 +161,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= ADMIN PANEL =================
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if not await is_admin(update.effective_user.id):
         return
 
     keyboard = [
@@ -139,210 +176,81 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= BUTTONS =================
+# ================= ADMIN MANAGEMENT =================
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast
-    global waiting_for_schedule_text
-
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != ADMIN_ID:
+async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_super_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Только главный админ может добавлять админов")
         return
 
-    if query.data == "broadcast":
-        waiting_for_broadcast = True
-        await query.message.reply_text("✍ Напиши текст для рассылки")
+    if not context.args:
+        await update.message.reply_text("Используй: /addadmin 123456789")
+        return
 
-    elif query.data == "schedule":
-        waiting_for_schedule_text = True
-        await query.message.reply_text(
-            "✍ Напиши текст для запланированной рассылки"
-        )
+    try:
+        new_admin = int(context.args[0])
 
-    elif query.data == "list":
-        await show_schedules(query)
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO admins (user_id)
+                VALUES ($1)
+                ON CONFLICT (user_id) DO NOTHING
+            """, new_admin)
 
-    elif query.data.startswith("delete_"):
-        message_id = int(query.data.split("_")[1])
+        await update.message.reply_text(f"✅ Админ {new_admin} добавлен")
+
+    except:
+        await update.message.reply_text("❌ Неверный ID")
+
+
+async def remove_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_super_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Только главный админ может удалять админов")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Используй: /removeadmin 123456789")
+        return
+
+    try:
+        admin_id = int(context.args[0])
+
+        if admin_id == SUPER_ADMIN:
+            await update.message.reply_text("🚫 Нельзя удалить главного админа")
+            return
 
         async with db_pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM scheduled_messages WHERE id = $1",
-                message_id
+                "DELETE FROM admins WHERE user_id=$1",
+                admin_id
             )
 
-        job = scheduled_jobs.get(message_id)
-        if job:
-            job.schedule_removal()
-            scheduled_jobs.pop(message_id, None)
+        await update.message.reply_text(f"❌ Админ {admin_id} удалён")
 
-        await query.message.edit_text(
-            f"❌ Рассылка ID {message_id} удалена"
-        )
-
-
-# ================= SHOW LIST =================
-
-async def show_schedules(query):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT id, text, send_time
-            FROM scheduled_messages
-            WHERE status='scheduled'
-            ORDER BY send_time
-        """)
-
-    if not rows:
-        await query.message.reply_text("📭 Нет запланированных рассылок")
-        return
-
-    for row in rows:
-        keyboard = [
-            [InlineKeyboardButton(
-                "❌ Удалить",
-                callback_data=f"delete_{row['id']}"
-            )]
-        ]
-
-        local_time = row["send_time"].strftime("%d.%m.%Y %H:%M")
-
-        await query.message.reply_text(
-            f"🆔 ID: {row['id']}\n"
-            f"🕒 {local_time}\n"
-            f"✉ {row['text'][:40]}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-
-# ================= MESSAGES =================
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast
-    global waiting_for_schedule_text
-    global waiting_for_schedule_time
-    global scheduled_text
-
-    user_id = update.effective_user.id
-    await save_user(user_id)
-
-    if user_id == ADMIN_ID and waiting_for_broadcast:
-        waiting_for_broadcast = False
-        text = update.message.text
-        users = await get_all_users()
-
-        await update.message.reply_text("📢 Начинаю рассылку...")
-
-        for uid in users:
-            try:
-                await context.bot.send_message(uid, text)
-                await asyncio.sleep(0.05)
-            except:
-                pass
-
-        await update.message.reply_text("✅ Рассылка завершена")
-        return
-
-    if user_id == ADMIN_ID and waiting_for_schedule_text:
-        scheduled_text = update.message.text
-        waiting_for_schedule_text = False
-        waiting_for_schedule_time = True
-
-        await update.message.reply_text(
-            "🕒 Введи дату и время:\n\n"
-            "11.02.2026 19:30"
-        )
-        return
-
-    if user_id == ADMIN_ID and waiting_for_schedule_time:
-        try:
-            send_time = datetime.strptime(
-                update.message.text.strip(),
-                "%d.%m.%Y %H:%M"
-            )
-
-            waiting_for_schedule_time = False
-
-            async with db_pool.acquire() as conn:
-                row = await conn.fetchrow("""
-                    INSERT INTO scheduled_messages (text, send_time)
-                    VALUES ($1, $2)
-                    RETURNING id
-                """, scheduled_text, send_time)
-
-            message_id = row["id"]
-
-            job = context.job_queue.run_once(
-                send_scheduled_broadcast,
-                when=send_time.replace(tzinfo=timezone.utc),
-                data={
-                    "text": scheduled_text,
-                    "id": message_id
-                },
-                name=str(message_id)
-            )
-
-            scheduled_jobs[message_id] = job
-
-            await update.message.reply_text(
-                f"✅ Запланировано на {update.message.text}"
-            )
-
-        except Exception as e:
-            print("SCHEDULE ERROR:", e)
-            await update.message.reply_text(
-                "❌ Неправильный формат.\nПример: 11.02.2026 19:30"
-            )
-
-
-# ================= SEND =================
-
-async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data
-    text = data["text"]
-    message_id = data["id"]
-
-    users = await get_all_users()
-
-    for uid in users:
-        try:
-            await context.bot.send_message(uid, text)
-            await asyncio.sleep(0.05)
-        except:
-            pass
-
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE scheduled_messages SET status='sent' WHERE id=$1",
-            message_id
-        )
-
-    scheduled_jobs.pop(message_id, None)
+    except:
+        await update.message.reply_text("❌ Неверный ID")
 
 
 # ================= STATS =================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
+    if not await is_admin(update.effective_user.id):
         return
 
     async with db_pool.acquire() as conn:
-        users_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM users"
-        )
-
+        users_count = await conn.fetchval("SELECT COUNT(*) FROM users")
         scheduled_count = await conn.fetchval(
             "SELECT COUNT(*) FROM scheduled_messages WHERE status='scheduled'"
         )
-
         sent_count = await conn.fetchval(
             "SELECT COUNT(*) FROM scheduled_messages WHERE status='sent'"
         )
+        admins_count = await conn.fetchval("SELECT COUNT(*) FROM admins")
 
     await update.message.reply_text(
         f"📊 Статистика\n\n"
         f"👥 Пользователей: {users_count}\n"
+        f"👮 Админов: {admins_count}\n"
         f"🕒 Запланировано: {scheduled_count}\n"
         f"✅ Отправлено: {sent_count}"
     )
@@ -360,9 +268,10 @@ app = (
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
 app.add_handler(CommandHandler("stats", stats))
+app.add_handler(CommandHandler("addadmin", add_admin))
+app.add_handler(CommandHandler("removeadmin", remove_admin))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("🚀 Bot started")
 app.run_polling()
-
