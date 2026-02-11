@@ -174,19 +174,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------- ЗАПУСК ----------------
-async def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+app = ApplicationBuilder().token(TOKEN).build()
 
-    await init_db(app)
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("admin", admin))
+app.add_handler(CommandHandler("stats", stats))
+app.add_handler(CallbackQueryHandler(button))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot started")
-    await app.run_polling()
+async def on_startup(app):
+    global db
+    db = await asyncpg.connect(DATABASE_URL)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            joined_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+    print("Database connected")
+
+
+app.post_init = on_startup
+
+print("Bot started")
+app.run_polling()
+
