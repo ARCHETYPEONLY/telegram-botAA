@@ -25,7 +25,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
 ADMIN_ID = 963261169
-CHANNEL_USERNAME = "@username_твоего_канала"  # <-- ЗАМЕНИ
+CHANNEL_USERNAME = "@ECLIPSEPARTY1"  # <-- ЗАМЕНИ
 
 # ================= GLOBALS =================
 
