@@ -229,55 +229,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # === SCHEDULE STEP 2 ===
-  if waiting_for_schedule_time:
+    if waiting_for_schedule_time:
 
-    if not message.text:
-        await message.reply_text("❌ Отправь дату текстом")
-        return
+        if not message.text:
+            await message.reply_text("❌ Отправь дату текстом")
+            return
 
-    try:
-        send_time = datetime.strptime(
-            message.text.strip(),
-            "%d.%m.%Y %H:%M"
-        )
-    except ValueError:
-        await message.reply_text(
-            "❌ Неверный формат даты\n\n"
-            "Пример:\n"
-            "11.02.2026 21:40"
-        )
-        return
+        try:
+            send_time = datetime.strptime(
+                message.text.strip(),
+                "%d.%m.%Y %H:%M"
+            )
+        except ValueError:
+            await message.reply_text(
+                "❌ Неверный формат даты\n\n"
+                "Пример:\n"
+                "11.02.2026 21:40"
+            )
+            return
 
-    try:
-        waiting_for_schedule_time = False
-
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("""
-                INSERT INTO scheduled_messages
-                (text, file_id, file_type, send_time)
-                VALUES ($1, $2, $3, $4)
-                RETURNING *
-            """,
-            scheduled_content["text"],
-            scheduled_content["file_id"],
-            scheduled_content["file_type"],
-            send_time)
-
-        job = context.job_queue.run_once(
-            send_scheduled_broadcast,
-            when=send_time.replace(tzinfo=timezone.utc),
-            data=dict(row),
-            name=str(row["id"])
-        )
-
-        scheduled_jobs[row["id"]] = job
-
-        await message.reply_text("✅ Запланировано")
-
-    except Exception as e:
-        await message.reply_text(f"❌ Ошибка планирования:\n{e}")
-
-
+        try:
             waiting_for_schedule_time = False
 
             async with db_pool.acquire() as conn:
@@ -303,8 +274,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await message.reply_text("✅ Запланировано")
 
-        except:
-            await message.reply_text("❌ Неверный формат")
+        except Exception as e:
+            await message.reply_text(f"❌ Ошибка планирования:\n{e}")
 
 
 # ================= CONTENT =================
