@@ -397,16 +397,15 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
 print("🚀 Bot started (webhook mode)")
 
-PORT = int(os.environ.get("PORT", 8000))
+PORT = int(os.environ.get("PORT", 8080))
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
 if not RAILWAY_URL:
     raise RuntimeError("RAILWAY_STATIC_URL not set")
 
-WEBHOOK_URL = f"https://{RAILWAY_URL}"
-
 app.run_webhook(
     listen="0.0.0.0",
     port=PORT,
-    webhook_url=WEBHOOK_URL,
+    url_path="webhook",
+    webhook_url=f"https://{RAILWAY_URL}/webhook",
 )
