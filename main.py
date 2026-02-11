@@ -3,12 +3,7 @@ import asyncio
 import asyncpg
 from datetime import datetime, timezone
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -17,20 +12,25 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+# ================= CONFIG =================
+
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-from datetime import datetime, timezone
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    ApplicationBuilder,
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
 ADMIN_ID = 963261169  # <-- ТВОЙ ID
+
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN not set")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL not set")
+
+if not RAILWAY_URL:
+    raise RuntimeError("RAILWAY_STATIC_URL not set")
+
+# ================= GLOBAL =================
 
 db_pool = None
 scheduled_jobs = {}
@@ -40,16 +40,15 @@ waiting_for_schedule_text = False
 waiting_for_schedule_time = False
 scheduled_content = None
 
-
 # ================= DATABASE =================
 
 async def init_db(app):
     global db_pool
+
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     print("✅ Database connected")
 
     async with db_pool.acquire() as conn:
-
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -107,13 +106,11 @@ async def get_all_users():
         rows = await conn.fetch("SELECT user_id FROM users")
         return [r["user_id"] for r in rows]
 
-
 # ================= USER =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user(update.effective_user)
     await update.message.reply_text("🚀 Бот работает")
-
 
 # ================= ADMIN PANEL =================
 
@@ -132,7 +129,6 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-
 # ================= BUTTONS =================
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -146,15 +142,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "broadcast":
         waiting_for_broadcast = True
-        await query.message.reply_text(
-            "Отправь текст / фото / видео / гиф"
-        )
+        await query.message.reply_text("Отправь текст / фото / видео / гиф")
 
     elif query.data == "schedule":
         waiting_for_schedule_text = True
-        await query.message.reply_text(
-            "Отправь контент для планирования"
-        )
+        await query.message.reply_text("Отправь контент для планирования")
 
     elif query.data == "list":
         await show_schedules(query)
@@ -174,7 +166,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             scheduled_jobs.pop(message_id, None)
 
         await query.message.edit_text("❌ Удалено")
-
 
 # ================= LIST =================
 
@@ -205,7 +196,6 @@ async def show_schedules(query):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-
 # ================= MESSAGE HANDLER =================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -225,14 +215,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Ответ через reply
         if message.reply_to_message:
             text = message.reply_to_message.text
-
             if text and "ID:" in text:
                 try:
                     target_id = int(text.split("ID:")[1].split("\n")[0])
-                    await context.bot.send_message(
-                        target_id,
-                        message.text
-                    )
+                    await context.bot.send_message(target_id, message.text)
                     await message.reply_text("✅ Ответ отправлен")
                 except Exception as e:
                     await message.reply_text(f"❌ Ошибка: {e}")
@@ -306,34 +292,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message.message_id
     )
 
-
 # ================= CONTENT =================
 
 def extract_content(message):
     if message.photo:
-        return {
-            "text": message.caption,
-            "file_id": message.photo[-1].file_id,
-            "file_type": "photo"
-        }
+        return {"text": message.caption, "file_id": message.photo[-1].file_id, "file_type": "photo"}
     elif message.video:
-        return {
-            "text": message.caption,
-            "file_id": message.video.file_id,
-            "file_type": "video"
-        }
+        return {"text": message.caption, "file_id": message.video.file_id, "file_type": "video"}
     elif message.animation:
-        return {
-            "text": message.caption,
-            "file_id": message.animation.file_id,
-            "file_type": "animation"
-        }
+        return {"text": message.caption, "file_id": message.animation.file_id, "file_type": "animation"}
     else:
-        return {
-            "text": message.text,
-            "file_id": None,
-            "file_type": "text"
-        }
+        return {"text": message.text, "file_id": None, "file_type": "text"}
 
 
 async def send_content(context, user_id, content):
@@ -378,7 +347,6 @@ async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
 
     scheduled_jobs.pop(data["id"], None)
 
-
 # ================= STATS =================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -396,7 +364,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕒 Запланировано: {scheduled}\n"
         f"✅ Отправлено: {sent}"
     )
-
 
 # ================= APP INIT =================
 
@@ -416,8 +383,6 @@ app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 print("🚀 Bot started (webhook mode)")
 
 PORT = int(os.environ.get("PORT", 8000))
-RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
-
 WEBHOOK_PATH = "webhook"
 WEBHOOK_URL = f"https://{RAILWAY_URL}/{WEBHOOK_PATH}"
 
