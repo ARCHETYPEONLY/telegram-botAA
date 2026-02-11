@@ -14,44 +14,11 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-db = None
-
-async def init_db(app):
-    global db
-    db = await asyncpg.connect(DATABASE_URL)
-
-    # создаём таблицу если её нет
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            joined_at TIMESTAMP DEFAULT NOW(),
-            funnel_step INT DEFAULT 0,
-            funnel_active BOOLEAN DEFAULT TRUE
-        )
-    """)
-
-    # если колонка отсутствует — добавим её
-    await db.execute("""
-        ALTER TABLE users
-        ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT NOW()
-    """)
-
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS funnel_steps (
-            id SERIAL PRIMARY KEY,
-            step_number INT,
-            delay_seconds INT,
-            message TEXT
-        )
-    """)
-
-
 CHANNEL_USERNAME = "@ECLIPSEPARTY1"
-ADMIN_ID = 963261169  # <-- твой id
+ADMIN_ID = 963261169
 
-waiting_for_broadcast = False
 db = None
+waiting_for_broadcast = False
 
 
 # ---------------- БАЗА ----------------
@@ -62,7 +29,18 @@ async def init_db(app):
     await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
-            joined_at TIMESTAMP DEFAULT NOW()
+            joined_at TIMESTAMP DEFAULT NOW(),
+            funnel_step INTEGER DEFAULT 0,
+            funnel_active BOOLEAN DEFAULT TRUE
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS funnel_steps (
+            id SERIAL PRIMARY KEY,
+            step_number INTEGER,
+            delay_seconds INTEGER,
+            message TEXT
         )
     """)
 
@@ -93,21 +71,65 @@ async def get_new_users_24h():
     return row["count"]
 
 
+# ---------------- АВТОВОРОНКА ----------------
+async def start_funnel(user_id):
+    global db
+
+    user = await db.fetchrow("""
+        SELECT funnel_step, funnel_active
+        FROM users
+        WHERE user_id = $1
+    """, user_id)
+
+    if not user or not user["funnel_active"]:
+        return
+
+    step = await db.fetchrow("""
+        SELECT * FROM funnel_steps
+        WHERE step_number = $1
+    """, user["funnel_step"])
+
+    if not step:
+        return
+
+    await asyncio.sleep(step["delay_seconds"])
+
+    try:
+        await app.bot.send_message(user_id, step["message"])
+    except:
+        return
+
+    await db.execute("""
+        UPDATE users
+        SET funnel_step = funnel_step + 1
+        WHERE user_id = $1
+    """, user_id)
+
+    asyncio.create_task(start_funnel(user_id))
+
+
 # ---------------- ПРОВЕРКА ПОДПИСКИ ----------------
 async def check_subscription(user_id, context):
     try:
         member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
-        print("STATUS:", member.status)
         return member.status in ["member", "administrator", "creator"]
-    except Exception as e:
-        print("ERROR:", e)
+    except:
         return False
 
 
 # ---------------- СТАРТ ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
     await save_user(user_id)
+
+    await db.execute("""
+        UPDATE users
+        SET funnel_step = 0, funnel_active = TRUE
+        WHERE user_id = $1
+    """, user_id)
+
+    asyncio.create_task(start_funnel(user_id))
 
     is_subscribed = await check_subscription(user_id, context)
 
@@ -126,7 +148,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ---------------- АДМИН ПАНЕЛЬ ----------------
+# ---------------- АДМИН ----------------
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -143,10 +165,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- СТАТИСТИКА ----------------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print("STATS COMMAND TRIGGERED")
-
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Ты не админ")
         return
 
     total = await get_users_count()
@@ -181,7 +200,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("✍ Напиши текст для рассылки")
 
 
-# ---------------- ОБРАБОТКА ТЕКСТА ----------------
+# ---------------- ТЕКСТ ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_broadcast
 
@@ -207,7 +226,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------- ЗАПУСК ----------------
-app = ApplicationBuilder().token(TOKEN).build()
+app = ApplicationBuilder().token(TOKEN).post_init(init_db).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
@@ -215,23 +234,5 @@ app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-
-async def on_startup(app):
-    global db
-    db = await asyncpg.connect(DATABASE_URL)
-
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            joined_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-
-    print("Database connected")
-
-
-app.post_init = on_startup
-
 print("Bot started")
 app.run_polling()
-
