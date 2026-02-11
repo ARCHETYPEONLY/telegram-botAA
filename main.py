@@ -42,39 +42,29 @@ async def init_db(app):
 
     async with db_pool.acquire() as conn:
 
-        # USERS
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
+                username TEXT,
                 joined_at TIMESTAMP DEFAULT NOW()
             )
         """)
 
-        # 🔥 авто-миграция
+        # если таблица старая — добавим username
         await conn.execute("""
             ALTER TABLE users
             ADD COLUMN IF NOT EXISTS username TEXT
         """)
 
-        # SCHEDULED MESSAGES
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id SERIAL PRIMARY KEY,
                 text TEXT,
+                file_id TEXT,
+                file_type TEXT,
                 send_time TIMESTAMP NOT NULL,
                 status TEXT DEFAULT 'scheduled'
             )
-        """)
-
-        # 🔥 авто-миграции
-        await conn.execute("""
-            ALTER TABLE scheduled_messages
-            ADD COLUMN IF NOT EXISTS file_id TEXT
-        """)
-
-        await conn.execute("""
-            ALTER TABLE scheduled_messages
-            ADD COLUMN IF NOT EXISTS file_type TEXT
         """)
 
     await restore_jobs(app)
@@ -180,6 +170,147 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("❌ Удалено")
 
 
+# ================= LIST =================
+
+async def show_schedules(query):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM scheduled_messages
+            WHERE status='scheduled'
+            ORDER BY send_time
+        """)
+
+    if not rows:
+        await query.message.reply_text("📭 Нет рассылок")
+        return
+
+    for row in rows:
+        keyboard = [[
+            InlineKeyboardButton(
+                "❌ Удалить",
+                callback_data=f"delete_{row['id']}"
+            )
+        ]]
+
+        await query.message.reply_text(
+            f"🆔 ID: {row['id']}\n"
+            f"🕒 {row['send_time'].strftime('%d.%m.%Y %H:%M')}\n"
+            f"📦 Тип: {row['file_type'] or 'text'}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+# ================= CONTENT =================
+
+def extract_content(message):
+    if message.photo:
+        return {
+            "text": message.caption,
+            "file_id": message.photo[-1].file_id,
+            "file_type": "photo"
+        }
+
+    elif message.video:
+        return {
+            "text": message.caption,
+            "file_id": message.video.file_id,
+            "file_type": "video"
+        }
+
+    elif message.animation:
+        return {
+            "text": message.caption,
+            "file_id": message.animation.file_id,
+            "file_type": "animation"
+        }
+
+    elif message.document and message.document.mime_type == "image/gif":
+        return {
+            "text": message.caption,
+            "file_id": message.document.file_id,
+            "file_type": "animation"
+        }
+
+    else:
+        return {
+            "text": message.text,
+            "file_id": None,
+            "file_type": "text"
+        }
+
+
+async def send_content(context, user_id, content):
+    text = content.get("text")
+
+    if content["file_type"] == "photo":
+        await context.bot.send_photo(user_id, content["file_id"], caption=text)
+
+    elif content["file_type"] == "video":
+        await context.bot.send_video(user_id, content["file_id"], caption=text)
+
+    elif content["file_type"] == "animation":
+        await context.bot.send_animation(user_id, content["file_id"], caption=text)
+
+    else:
+        if text:
+            await context.bot.send_message(user_id, text)
+
+
+async def broadcast_content(context, message):
+    users = await get_all_users()
+    content = extract_content(message)
+
+    for uid in users:
+        try:
+            await send_content(context, uid, content)
+            await asyncio.sleep(0.05)
+        except:
+            pass
+
+
+async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
+    data = context.job.data
+    users = await get_all_users()
+
+    for uid in users:
+        try:
+            await send_content(context, uid, data)
+            await asyncio.sleep(0.05)
+        except:
+            pass
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE scheduled_messages SET status='sent' WHERE id=$1",
+            data["id"]
+        )
+
+    scheduled_jobs.pop(data["id"], None)
+
+
+# ================= STATS =================
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    async with db_pool.acquire() as conn:
+        users = await conn.fetchval("SELECT COUNT(*) FROM users")
+        scheduled = await conn.fetchval(
+            "SELECT COUNT(*) FROM scheduled_messages WHERE status='scheduled'"
+        )
+        sent = await conn.fetchval(
+            "SELECT COUNT(*) FROM scheduled_messages WHERE status='sent'"
+        )
+
+    await update.message.reply_text(
+        f"📊 Статистика\n\n"
+        f"👥 Пользователей: {users}\n"
+        f"🕒 Запланировано: {scheduled}\n"
+        f"✅ Отправлено: {sent}"
+    )
+
+
 # ================= MESSAGE HANDLER =================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,20 +324,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await save_user(user)
 
-    # ===== ADMIN =====
     if user.id == ADMIN_ID:
-
-        # reply-ответ пользователю
-        if message.reply_to_message:
-            text = message.reply_to_message.text
-            if text and "ID:" in text:
-                try:
-                    target_id = int(text.split("ID:")[1].split("\n")[0])
-                    await context.bot.send_message(target_id, message.text)
-                    await message.reply_text("✅ Ответ отправлен")
-                except Exception as e:
-                    await message.reply_text(f"❌ Ошибка: {e}")
-                return
 
         if waiting_for_broadcast:
             waiting_for_broadcast = False
@@ -260,77 +378,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             except Exception as e:
                 await message.reply_text(f"❌ Ошибка:\n{e}")
+
             return
-
-        return
-
-    # ===== USER → ADMIN =====
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"📩 Новое сообщение\nID: {user.id}\nUsername: @{user.username}"
-    )
-
-    await context.bot.forward_message(
-        ADMIN_ID,
-        update.effective_chat.id,
-        message.message_id
-    )
-
-
-# ================= CONTENT =================
-
-def extract_content(message):
-    if message.photo:
-        return {"text": message.caption, "file_id": message.photo[-1].file_id, "file_type": "photo"}
-    elif message.video:
-        return {"text": message.caption, "file_id": message.video.file_id, "file_type": "video"}
-    elif message.animation:
-        return {"text": message.caption, "file_id": message.animation.file_id, "file_type": "animation"}
-    else:
-        return {"text": message.text, "file_id": None, "file_type": "text"}
-
-
-async def send_content(context, user_id, content):
-    if content["file_type"] == "photo":
-        await context.bot.send_photo(user_id, content["file_id"], caption=content["text"])
-    elif content["file_type"] == "video":
-        await context.bot.send_video(user_id, content["file_id"], caption=content["text"])
-    elif content["file_type"] == "animation":
-        await context.bot.send_animation(user_id, content["file_id"], caption=content["text"])
-    else:
-        await context.bot.send_message(user_id, content["text"])
-
-
-async def broadcast_content(context, message):
-    users = await get_all_users()
-    content = extract_content(message)
-
-    for uid in users:
-        try:
-            await send_content(context, uid, content)
-            await asyncio.sleep(0.05)
-        except:
-            pass
-
-
-async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data
-    users = await get_all_users()
-
-    for uid in users:
-        try:
-            await send_content(context, uid, data)
-            await asyncio.sleep(0.05)
-        except:
-            pass
-
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE scheduled_messages SET status='sent' WHERE id=$1",
-            data["id"]
-        )
-
-    scheduled_jobs.pop(data["id"], None)
 
 
 # ================= APP INIT =================
@@ -344,12 +393,14 @@ app = (
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
+app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
 print("🚀 Bot started (webhook mode)")
 
 PORT = int(os.environ.get("PORT", 8000))
+
 WEBHOOK_PATH = "webhook"
 WEBHOOK_URL = f"https://{RAILWAY_URL}/{WEBHOOK_PATH}"
 
