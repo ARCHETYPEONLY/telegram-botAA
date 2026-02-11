@@ -1,8 +1,6 @@
 import os
 import asyncio
 import asyncpg
-from datetime import datetime
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -16,64 +14,68 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHANNEL_USERNAME = "@ECLIPSEPARTY1"
-ADMIN_ID = 963261169  # твой id
+ADMIN_ID = 963261169
 
 waiting_for_broadcast = False
-waiting_for_schedule_time = False
 db = None
 
 
-# ---------------- ПОДКЛЮЧЕНИЕ К БАЗЕ (С RETRY) ----------------
+# ---------------- ПОДКЛЮЧЕНИЕ К БАЗЕ (POOL) ----------------
 async def init_db(app):
     global db
 
-    for i in range(10):  # 10 попыток
+    for i in range(10):
         try:
-            db = await asyncpg.connect(
+            db = await asyncpg.create_pool(
                 DATABASE_URL,
                 ssl="require"
             )
-            print("✅ Database connected")
+            print("✅ Database pool connected")
             break
-        except Exception as e:
+        except Exception:
             print(f"DB connection failed... retry {i+1}/10")
             await asyncio.sleep(3)
     else:
         raise Exception("❌ Could not connect to database")
 
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            joined_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
+    async with db.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                joined_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
 
 
-# ---------------- БАЗА ----------------
+# ---------------- БАЗА ФУНКЦИИ ----------------
 async def save_user(user_id):
-    await db.execute("""
-        INSERT INTO users (user_id)
-        VALUES ($1)
-        ON CONFLICT (user_id) DO NOTHING
-    """, user_id)
+    async with db.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO users (user_id)
+            VALUES ($1)
+            ON CONFLICT (user_id) DO NOTHING
+        """, user_id)
 
 
 async def get_all_users():
-    rows = await db.fetch("SELECT user_id FROM users")
-    return [row["user_id"] for row in rows]
+    async with db.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM users")
+        return [row["user_id"] for row in rows]
 
 
 async def get_users_count():
-    row = await db.fetchrow("SELECT COUNT(*) FROM users")
-    return row["count"]
+    async with db.acquire() as conn:
+        row = await conn.fetchrow("SELECT COUNT(*) FROM users")
+        return row["count"]
 
 
 async def get_new_users_24h():
-    row = await db.fetchrow("""
-        SELECT COUNT(*) FROM users
-        WHERE joined_at >= NOW() - INTERVAL '24 HOURS'
-    """)
-    return row["count"]
+    async with db.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT COUNT(*) FROM users
+            WHERE joined_at >= NOW() - INTERVAL '24 HOURS'
+        """)
+        return row["count"]
 
 
 # ---------------- ПРОВЕРКА ПОДПИСКИ ----------------
@@ -115,8 +117,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     keyboard = [
-        [InlineKeyboardButton("📢 Сделать рассылку", callback_data="broadcast")],
-        [InlineKeyboardButton("⏰ Запланировать рассылку", callback_data="schedule")]
+        [InlineKeyboardButton("📢 Сделать рассылку", callback_data="broadcast")]
     ]
 
     await update.message.reply_text(
@@ -143,7 +144,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------- КНОПКИ ----------------
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_broadcast
-    global waiting_for_schedule_time
 
     query = update.callback_query
     await query.answer()
@@ -162,26 +162,18 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_for_broadcast = True
         await query.message.reply_text("✍ Напиши текст для рассылки")
 
-    if query.data == "schedule" and user_id == ADMIN_ID:
-        waiting_for_schedule_time = True
-        await query.message.reply_text(
-            "🕒 Введи дату и время по МСК в формате:\n\n"
-            "11.02.2026 17:52"
-        )
-
 
 # ---------------- ОБРАБОТКА ТЕКСТА ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_broadcast
-    global waiting_for_schedule_time
 
     user_id = update.effective_user.id
     await save_user(user_id)
 
-    # Обычная рассылка
     if user_id == ADMIN_ID and waiting_for_broadcast:
         waiting_for_broadcast = False
         text = update.message.text
+
         users = await get_all_users()
 
         await update.message.reply_text("📢 Начинаю рассылку...")
@@ -195,40 +187,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("✅ Рассылка завершена")
 
-    # Планирование
-    elif user_id == ADMIN_ID and waiting_for_schedule_time:
-        try:
-            dt = datetime.strptime(update.message.text, "%d.%m.%Y %H:%M")
-            waiting_for_schedule_time = False
-
-            delay = (dt - datetime.now()).total_seconds()
-
-            if delay <= 0:
-                await update.message.reply_text("❌ Время уже прошло")
-                return
-
-            await update.message.reply_text(
-                f"✅ Рассылка запланирована на {update.message.text} (МСК)"
-            )
-
-            async def scheduled_broadcast():
-                await asyncio.sleep(delay)
-                users = await get_all_users()
-                for uid in users:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=uid,
-                            text="📢 Запланированная рассылка"
-                        )
-                        await asyncio.sleep(0.05)
-                    except:
-                        pass
-
-            asyncio.create_task(scheduled_broadcast())
-
-        except:
-            await update.message.reply_text("❌ Неправильный формат")
-
 
 # ---------------- ЗАПУСК ----------------
 app = ApplicationBuilder().token(TOKEN).post_init(init_db).build()
@@ -239,5 +197,6 @@ app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-print("Bot started")
+print("🚀 Bot started")
 app.run_polling()
+
