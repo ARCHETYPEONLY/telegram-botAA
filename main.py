@@ -110,7 +110,10 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- СТАТИСТИКА ----------------
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print("STATS COMMAND TRIGGERED")
+
     if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Ты не админ")
         return
 
     total = await get_users_count()
