@@ -81,7 +81,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Так че, тусим то будем?", show_alert=True)
 
     # Рассылка
-    if query.data == "broadcast" and user_id == ADMIN_ID:
+    if query.data == "broadcast" and user_id == 963261169:
         waiting_for_broadcast = True
         await query.message.reply_text("✍ Напиши текст для рассылки")
 
