@@ -3,7 +3,12 @@ import asyncio
 import asyncpg
 from datetime import datetime, timezone
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -13,24 +18,11 @@ from telegram.ext import (
     filters,
 )
 
-# ================= CONFIG =================
-
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
 ADMIN_ID = 963261169  # <-- ТВОЙ ID
-
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN not set")
-
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL not set")
-
-if not RAILWAY_URL:
-    raise RuntimeError("RAILWAY_STATIC_URL not set")
-
-# ================= GLOBAL =================
 
 db_pool = None
 scheduled_jobs = {}
@@ -40,32 +32,49 @@ waiting_for_schedule_text = False
 waiting_for_schedule_time = False
 scheduled_content = None
 
+
 # ================= DATABASE =================
 
 async def init_db(app):
     global db_pool
-
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     print("✅ Database connected")
 
     async with db_pool.acquire() as conn:
+
+        # USERS
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
-                username TEXT,
                 joined_at TIMESTAMP DEFAULT NOW()
             )
         """)
 
+        # 🔥 авто-миграция
+        await conn.execute("""
+            ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS username TEXT
+        """)
+
+        # SCHEDULED MESSAGES
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id SERIAL PRIMARY KEY,
                 text TEXT,
-                file_id TEXT,
-                file_type TEXT,
                 send_time TIMESTAMP NOT NULL,
                 status TEXT DEFAULT 'scheduled'
             )
+        """)
+
+        # 🔥 авто-миграции
+        await conn.execute("""
+            ALTER TABLE scheduled_messages
+            ADD COLUMN IF NOT EXISTS file_id TEXT
+        """)
+
+        await conn.execute("""
+            ALTER TABLE scheduled_messages
+            ADD COLUMN IF NOT EXISTS file_type TEXT
         """)
 
     await restore_jobs(app)
@@ -106,11 +115,13 @@ async def get_all_users():
         rows = await conn.fetch("SELECT user_id FROM users")
         return [r["user_id"] for r in rows]
 
+
 # ================= USER =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user(update.effective_user)
     await update.message.reply_text("🚀 Бот работает")
+
 
 # ================= ADMIN PANEL =================
 
@@ -128,6 +139,7 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙ Админ панель",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
 
 # ================= BUTTONS =================
 
@@ -167,34 +179,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.message.edit_text("❌ Удалено")
 
-# ================= LIST =================
-
-async def show_schedules(query):
-    async with db_pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT * FROM scheduled_messages
-            WHERE status='scheduled'
-            ORDER BY send_time
-        """)
-
-    if not rows:
-        await query.message.reply_text("📭 Нет рассылок")
-        return
-
-    for row in rows:
-        keyboard = [[
-            InlineKeyboardButton(
-                "❌ Удалить",
-                callback_data=f"delete_{row['id']}"
-            )
-        ]]
-
-        await query.message.reply_text(
-            f"🆔 ID: {row['id']}\n"
-            f"🕒 {row['send_time'].strftime('%d.%m.%Y %H:%M')}\n"
-            f"📦 Тип: {row['file_type'] or 'text'}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
 
 # ================= MESSAGE HANDLER =================
 
@@ -212,7 +196,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== ADMIN =====
     if user.id == ADMIN_ID:
 
-        # Ответ через reply
+        # reply-ответ пользователю
         if message.reply_to_message:
             text = message.reply_to_message.text
             if text and "ID:" in text:
@@ -292,6 +276,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message.message_id
     )
 
+
 # ================= CONTENT =================
 
 def extract_content(message):
@@ -347,23 +332,6 @@ async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
 
     scheduled_jobs.pop(data["id"], None)
 
-# ================= STATS =================
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    async with db_pool.acquire() as conn:
-        users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        scheduled = await conn.fetchval("SELECT COUNT(*) FROM scheduled_messages WHERE status='scheduled'")
-        sent = await conn.fetchval("SELECT COUNT(*) FROM scheduled_messages WHERE status='sent'")
-
-    await update.message.reply_text(
-        f"📊 Статистика\n\n"
-        f"👥 Пользователей: {users}\n"
-        f"🕒 Запланировано: {scheduled}\n"
-        f"✅ Отправлено: {sent}"
-    )
 
 # ================= APP INIT =================
 
@@ -376,7 +344,6 @@ app = (
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
-app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
