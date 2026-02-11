@@ -21,7 +21,7 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-ADMIN_ID = 963261169  # ✅ ТВОЙ ID
+ADMIN_ID = 963261169
 
 db_pool = None
 
@@ -37,7 +37,7 @@ async def init_db(app):
     global db_pool
 
     if not DATABASE_URL:
-        raise ValueError("DATABASE_URL не найден в переменных Railway")
+        raise ValueError("DATABASE_URL не найден")
 
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     print("✅ Database connected")
@@ -72,14 +72,14 @@ async def get_all_users():
         return [row["user_id"] for row in rows]
 
 
-# ================= USER COMMANDS =================
+# ================= USER =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user(update.effective_user.id)
     await update.message.reply_text("🚀 Бот работает")
 
 
-# ================= ADMIN PANEL =================
+# ================= ADMIN =================
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -144,7 +144,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Рассылка завершена")
         return
 
-    # ===== ШАГ 1 — текст =====
+    # ===== ШАГ 1 — ТЕКСТ =====
     if user_id == ADMIN_ID and waiting_for_schedule_text:
         scheduled_text = update.message.text
         waiting_for_schedule_text = False
@@ -156,14 +156,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ===== ШАГ 2 — дата =====
+    # ===== ШАГ 2 — ДАТА =====
     if user_id == ADMIN_ID and waiting_for_schedule_time:
         try:
             moscow = pytz.timezone("Europe/Moscow")
-            send_time = datetime.strptime(update.message.text, "%d.%m.%Y %H:%M")
-            send_time = moscow.localize(send_time)
 
+            send_time = datetime.strptime(
+                update.message.text.strip(),
+                "%d.%m.%Y %H:%M"
+            )
+
+            send_time = moscow.localize(send_time)
             now = datetime.now(moscow)
+
             delay = (send_time - now).total_seconds()
 
             if delay <= 0:
@@ -182,13 +187,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Рассылка будет отправлена {update.message.text} (МСК)"
             )
 
-        except:
+        except Exception as e:
+            print("SCHEDULE ERROR:", e)
             await update.message.reply_text(
                 "❌ Неправильный формат.\nПример: 11.02.2026 17:52"
             )
 
 
-# ================= SCHEDULED SEND =================
+# ================= JOB =================
 
 async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
     text = context.job.data
