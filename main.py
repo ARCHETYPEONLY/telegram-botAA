@@ -46,6 +46,12 @@ async def get_all_users():
     return [row["user_id"] for row in rows]
 
 
+# ---------- КОЛИЧЕСТВО ПОЛЬЗОВАТЕЛЕЙ ----------
+async def get_users_count():
+    row = await db.fetchrow("SELECT COUNT(*) FROM users")
+    return row["count"]
+
+
 # ---------- ПРОВЕРКА ПОДПИСКИ ----------
 async def check_subscription(user_id, context):
     try:
@@ -89,6 +95,15 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙ Админ панель",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+# ---------- STATS ----------
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    count = await get_users_count()
+    await update.message.reply_text(f"👥 ВСЕГО ЧУВАЧКОВ В БОТЕ: {count}")
 
 
 # ---------- КНОПКИ ----------
@@ -143,6 +158,7 @@ app = ApplicationBuilder().token(TOKEN).post_init(init_db).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
+app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
