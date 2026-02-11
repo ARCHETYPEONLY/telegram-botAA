@@ -2,13 +2,9 @@ import os
 import asyncio
 import asyncpg
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -22,7 +18,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
-ADMIN_ID = 963261169  # <-- ТВОЙ ID
+ADMIN_ID = 963261169  # твой ID
+LOCAL_TZ = ZoneInfo("Europe/Moscow")  # поменяй если другой часовой пояс
 
 db_pool = None
 scheduled_jobs = {}
@@ -50,7 +47,7 @@ async def init_db(app):
             )
         """)
 
-        # если таблица старая — добавим username
+        # если колонка username отсутствует — добавим
         await conn.execute("""
             ALTER TABLE users
             ADD COLUMN IF NOT EXISTS username TEXT
@@ -185,6 +182,10 @@ async def show_schedules(query):
         return
 
     for row in rows:
+        local_time = row["send_time"].replace(
+            tzinfo=timezone.utc
+        ).astimezone(LOCAL_TZ)
+
         keyboard = [[
             InlineKeyboardButton(
                 "❌ Удалить",
@@ -194,66 +195,140 @@ async def show_schedules(query):
 
         await query.message.reply_text(
             f"🆔 ID: {row['id']}\n"
-            f"🕒 {row['send_time'].strftime('%d.%m.%Y %H:%M')}\n"
+            f"🕒 {local_time.strftime('%d.%m.%Y %H:%M')}\n"
             f"📦 Тип: {row['file_type'] or 'text'}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+
+# ================= MESSAGE HANDLER =================
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global waiting_for_broadcast
+    global waiting_for_schedule_text
+    global waiting_for_schedule_time
+    global scheduled_content
+
+    user = update.effective_user
+    message = update.message
+
+    await save_user(user)
+
+    # ===== ADMIN =====
+    if user.id == ADMIN_ID:
+
+        # ответ пользователю через reply
+        if message.reply_to_message:
+            text = message.reply_to_message.text
+
+            if text and "ID:" in text:
+                try:
+                    target_id = int(text.split("ID:")[1].split("\n")[0])
+                    await context.bot.send_message(
+                        target_id,
+                        message.text
+                    )
+                    await message.reply_text("✅ Ответ отправлен")
+                except Exception as e:
+                    await message.reply_text(f"❌ Ошибка: {e}")
+                return
+
+        if waiting_for_broadcast:
+            waiting_for_broadcast = False
+            await broadcast_content(context, message)
+            await message.reply_text("✅ Рассылка завершена")
+            return
+
+        if waiting_for_schedule_text:
+            scheduled_content = extract_content(message)
+            waiting_for_schedule_text = False
+            waiting_for_schedule_time = True
+            await message.reply_text("🕒 Введи дату: 11.02.2026 21:40")
+            return
+
+        if waiting_for_schedule_time:
+            try:
+                local_dt = datetime.strptime(
+                    message.text.strip(),
+                    "%d.%m.%Y %H:%M"
+                ).replace(tzinfo=LOCAL_TZ)
+
+                utc_dt = local_dt.astimezone(timezone.utc)
+
+                if utc_dt <= datetime.now(timezone.utc):
+                    await message.reply_text("❌ Нельзя в прошлое")
+                    return
+
+                waiting_for_schedule_time = False
+
+                async with db_pool.acquire() as conn:
+                    row = await conn.fetchrow("""
+                        INSERT INTO scheduled_messages
+                        (text, file_id, file_type, send_time)
+                        VALUES ($1, $2, $3, $4)
+                        RETURNING *
+                    """,
+                        scheduled_content["text"],
+                        scheduled_content["file_id"],
+                        scheduled_content["file_type"],
+                        utc_dt.replace(tzinfo=None)
+                    )
+
+                job = context.job_queue.run_once(
+                    send_scheduled_broadcast,
+                    when=utc_dt,
+                    data=dict(row),
+                    name=str(row["id"])
+                )
+
+                scheduled_jobs[row["id"]] = job
+
+                await message.reply_text(
+                    f"✅ Запланировано на {local_dt.strftime('%d.%m.%Y %H:%M')}"
+                )
+
+            except Exception as e:
+                await message.reply_text(f"❌ Ошибка:\n{e}")
+
+            return
+
+        return
+
+    # ===== USER → ADMIN =====
+    await context.bot.send_message(
+        ADMIN_ID,
+        f"📩 Новое сообщение\nID: {user.id}\nUsername: @{user.username}"
+    )
+
+    await context.bot.forward_message(
+        ADMIN_ID,
+        update.effective_chat.id,
+        message.message_id
+    )
 
 
 # ================= CONTENT =================
 
 def extract_content(message):
     if message.photo:
-        return {
-            "text": message.caption,
-            "file_id": message.photo[-1].file_id,
-            "file_type": "photo"
-        }
-
+        return {"text": message.caption, "file_id": message.photo[-1].file_id, "file_type": "photo"}
     elif message.video:
-        return {
-            "text": message.caption,
-            "file_id": message.video.file_id,
-            "file_type": "video"
-        }
-
+        return {"text": message.caption, "file_id": message.video.file_id, "file_type": "video"}
     elif message.animation:
-        return {
-            "text": message.caption,
-            "file_id": message.animation.file_id,
-            "file_type": "animation"
-        }
-
-    elif message.document and message.document.mime_type == "image/gif":
-        return {
-            "text": message.caption,
-            "file_id": message.document.file_id,
-            "file_type": "animation"
-        }
-
+        return {"text": message.caption, "file_id": message.animation.file_id, "file_type": "animation"}
     else:
-        return {
-            "text": message.text,
-            "file_id": None,
-            "file_type": "text"
-        }
+        return {"text": message.text, "file_id": None, "file_type": "text"}
 
 
 async def send_content(context, user_id, content):
-    text = content.get("text")
-
     if content["file_type"] == "photo":
-        await context.bot.send_photo(user_id, content["file_id"], caption=text)
-
+        await context.bot.send_photo(user_id, content["file_id"], caption=content["text"])
     elif content["file_type"] == "video":
-        await context.bot.send_video(user_id, content["file_id"], caption=text)
-
+        await context.bot.send_video(user_id, content["file_id"], caption=content["text"])
     elif content["file_type"] == "animation":
-        await context.bot.send_animation(user_id, content["file_id"], caption=text)
-
+        await context.bot.send_animation(user_id, content["file_id"], caption=content["text"])
     else:
-        if text:
-            await context.bot.send_message(user_id, text)
+        await context.bot.send_message(user_id, content["text"])
 
 
 async def broadcast_content(context, message):
@@ -296,12 +371,8 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with db_pool.acquire() as conn:
         users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        scheduled = await conn.fetchval(
-            "SELECT COUNT(*) FROM scheduled_messages WHERE status='scheduled'"
-        )
-        sent = await conn.fetchval(
-            "SELECT COUNT(*) FROM scheduled_messages WHERE status='sent'"
-        )
+        scheduled = await conn.fetchval("SELECT COUNT(*) FROM scheduled_messages WHERE status='scheduled'")
+        sent = await conn.fetchval("SELECT COUNT(*) FROM scheduled_messages WHERE status='sent'")
 
     await update.message.reply_text(
         f"📊 Статистика\n\n"
@@ -309,77 +380,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕒 Запланировано: {scheduled}\n"
         f"✅ Отправлено: {sent}"
     )
-
-
-# ================= MESSAGE HANDLER =================
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast
-    global waiting_for_schedule_text
-    global waiting_for_schedule_time
-    global scheduled_content
-
-    user = update.effective_user
-    message = update.message
-
-    await save_user(user)
-
-    if user.id == ADMIN_ID:
-
-        if waiting_for_broadcast:
-            waiting_for_broadcast = False
-            await broadcast_content(context, message)
-            await message.reply_text("✅ Рассылка завершена")
-            return
-
-        if waiting_for_schedule_text:
-            scheduled_content = extract_content(message)
-            waiting_for_schedule_text = False
-            waiting_for_schedule_time = True
-            await message.reply_text("🕒 Введи дату: 11.02.2026 21:40")
-            return
-
-        if waiting_for_schedule_time:
-            try:
-                send_time = datetime.strptime(
-                    message.text.strip(),
-                    "%d.%m.%Y %H:%M"
-                ).replace(tzinfo=timezone.utc)
-
-                if send_time <= datetime.now(timezone.utc):
-                    await message.reply_text("❌ Нельзя в прошлое")
-                    return
-
-                waiting_for_schedule_time = False
-
-                async with db_pool.acquire() as conn:
-                    row = await conn.fetchrow("""
-                        INSERT INTO scheduled_messages
-                        (text, file_id, file_type, send_time)
-                        VALUES ($1, $2, $3, $4)
-                        RETURNING *
-                    """,
-                        scheduled_content["text"],
-                        scheduled_content["file_id"],
-                        scheduled_content["file_type"],
-                        send_time
-                    )
-
-                job = context.job_queue.run_once(
-                    send_scheduled_broadcast,
-                    when=send_time,
-                    data=dict(row),
-                    name=str(row["id"])
-                )
-
-                scheduled_jobs[row["id"]] = job
-
-                await message.reply_text("✅ Запланировано")
-
-            except Exception as e:
-                await message.reply_text(f"❌ Ошибка:\n{e}")
-
-            return
 
 
 # ================= APP INIT =================
