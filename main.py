@@ -20,7 +20,6 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# 🔥 ТВОЙ ID
 ADMIN_ID = 963261169
 
 db_pool = None
@@ -58,6 +57,37 @@ async def init_db(app):
                 send_time TIMESTAMP NOT NULL,
                 status TEXT DEFAULT 'scheduled'
             )
+        """)
+
+        # ===== AUTO MIGRATION =====
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='scheduled_messages'
+                    AND column_name='file_id'
+                ) THEN
+                    ALTER TABLE scheduled_messages ADD COLUMN file_id TEXT;
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='scheduled_messages'
+                    AND column_name='file_type'
+                ) THEN
+                    ALTER TABLE scheduled_messages ADD COLUMN file_type TEXT;
+                END IF;
+
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='scheduled_messages'
+                    AND column_name='status'
+                ) THEN
+                    ALTER TABLE scheduled_messages ADD COLUMN status TEXT DEFAULT 'scheduled';
+                END IF;
+            END
+            $$;
         """)
 
     await restore_jobs(app)
@@ -213,42 +243,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     message = update.message
 
-    # === BROADCAST ===
     if waiting_for_broadcast:
         waiting_for_broadcast = False
         await broadcast_content(context, message)
         await message.reply_text("✅ Рассылка завершена")
         return
 
-    # === SCHEDULE STEP 1 ===
     if waiting_for_schedule_text:
         scheduled_content = extract_content(message)
         waiting_for_schedule_text = False
         waiting_for_schedule_time = True
-        await message.reply_text("🕒 Введи дату: 11.02.2026 19:30")
+        await message.reply_text("🕒 Введи дату: 11.02.2026 21:40")
         return
 
-    # === SCHEDULE STEP 2 ===
     if waiting_for_schedule_time:
-
-        if not message.text:
-            await message.reply_text("❌ Отправь дату текстом")
-            return
-
         try:
             send_time = datetime.strptime(
                 message.text.strip(),
                 "%d.%m.%Y %H:%M"
             )
-        except ValueError:
-            await message.reply_text(
-                "❌ Неверный формат даты\n\n"
-                "Пример:\n"
-                "11.02.2026 21:40"
-            )
-            return
 
-        try:
             waiting_for_schedule_time = False
 
             async with db_pool.acquire() as conn:
@@ -321,31 +335,13 @@ async def broadcast_content(context, message):
 
 async def send_content(context, user_id, content):
     if content["file_type"] == "photo":
-        await context.bot.send_photo(
-            user_id,
-            content["file_id"],
-            caption=content["text"]
-        )
-
+        await context.bot.send_photo(user_id, content["file_id"], caption=content["text"])
     elif content["file_type"] == "video":
-        await context.bot.send_video(
-            user_id,
-            content["file_id"],
-            caption=content["text"]
-        )
-
+        await context.bot.send_video(user_id, content["file_id"], caption=content["text"])
     elif content["file_type"] == "animation":
-        await context.bot.send_animation(
-            user_id,
-            content["file_id"],
-            caption=content["text"]
-        )
-
+        await context.bot.send_animation(user_id, content["file_id"], caption=content["text"])
     else:
-        await context.bot.send_message(
-            user_id,
-            content["text"]
-        )
+        await context.bot.send_message(user_id, content["text"])
 
 
 # ================= SCHEDULE SEND =================
@@ -370,30 +366,7 @@ async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
     scheduled_jobs.pop(data["id"], None)
 
 
-# ================= STATS =================
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    async with db_pool.acquire() as conn:
-        users = await conn.fetchval("SELECT COUNT(*) FROM users")
-        scheduled = await conn.fetchval(
-            "SELECT COUNT(*) FROM scheduled_messages WHERE status='scheduled'"
-        )
-        sent = await conn.fetchval(
-            "SELECT COUNT(*) FROM scheduled_messages WHERE status='sent'"
-        )
-
-    await update.message.reply_text(
-        f"📊 Статистика\n\n"
-        f"👥 Пользователей: {users}\n"
-        f"🕒 Запланировано: {scheduled}\n"
-        f"✅ Отправлено: {sent}"
-    )
-
-
-# ================= WEBHOOK RUN =================
+# ================= RUN (WEBHOOK RAILWAY) =================
 
 app = (
     ApplicationBuilder()
@@ -404,21 +377,22 @@ app = (
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
-app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
 print("🚀 Bot started (webhook mode)")
 
-PORT = int(os.environ.get("PORT", 8080))
+PORT = int(os.environ.get("PORT", 8000))
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
 if not RAILWAY_URL:
     raise RuntimeError("RAILWAY_STATIC_URL not set")
 
+WEBHOOK_URL = f"https://{RAILWAY_URL}/webhook"
+
 app.run_webhook(
     listen="0.0.0.0",
     port=PORT,
+    webhook_url=WEBHOOK_URL,
     url_path="webhook",
-    webhook_url=f"https://{RAILWAY_URL}/webhook",
 )
