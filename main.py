@@ -14,6 +14,39 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+db = None
+
+async def init_db(app):
+    global db
+    db = await asyncpg.connect(DATABASE_URL)
+
+    # создаём таблицу если её нет
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            joined_at TIMESTAMP DEFAULT NOW(),
+            funnel_step INT DEFAULT 0,
+            funnel_active BOOLEAN DEFAULT TRUE
+        )
+    """)
+
+    # если колонка отсутствует — добавим её
+    await db.execute("""
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT NOW()
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS funnel_steps (
+            id SERIAL PRIMARY KEY,
+            step_number INT,
+            delay_seconds INT,
+            message TEXT
+        )
+    """)
+
+
 CHANNEL_USERNAME = "@ECLIPSEPARTY1"
 ADMIN_ID = 963261169  # <-- твой id
 
