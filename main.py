@@ -25,13 +25,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ТЫ В БАНДЕ 🔥")
     else:
         keyboard = [
-            [InlineKeyboardButton("📢 Подписаться", url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
-            [InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]
+            [InlineKeyboardButton("Подпишись уже, мы же там инфу кидаем))", url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
+            [InlineKeyboardButton("✅ Давай проверим", callback_data="check_sub")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            "❌ Я ХОЧУ УБЕДИТЬСЯ ЧТО ТЫ ИДЕШЬ",
+            "❌ Давай подписывайся, я все вижу)",
             reply_markup=reply_markup
         )
 
@@ -44,9 +44,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_subscribed = await check_subscription(user_id, context)
 
     if is_subscribed:
-        await query.edit_message_text("✅ СПАСИБО ЧТО ВСТУПИЛ, ДАВАЙ ТУСИТЬ! 🚀")
+        await query.edit_message_text("✅ Ну все, тусим! 🚀")
     else:
-        await query.answer("❌ ТЫ НЕ ПОДПИСАН!", show_alert=True)
+        await query.answer("❌ Так че, тусим то будем?", show_alert=True)
 
 app = ApplicationBuilder().token(TOKEN).build()
 
