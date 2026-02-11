@@ -20,7 +20,7 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ⚡ Главный админ (никогда не теряется)
+# 👑 Главный админ (никогда не удаляется)
 MAIN_ADMIN_ID = 963261169
 
 db_pool = None
@@ -42,7 +42,6 @@ async def init_db(app):
 
     async with db_pool.acquire() as conn:
 
-        # USERS
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -50,14 +49,12 @@ async def init_db(app):
             )
         """)
 
-        # ADMINS
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS admins (
                 user_id BIGINT PRIMARY KEY
             )
         """)
 
-        # SCHEDULED
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id SERIAL PRIMARY KEY,
@@ -67,7 +64,7 @@ async def init_db(app):
             )
         """)
 
-        # автомиграция status
+        # автомиграция status если таблица старая
         await conn.execute("""
             DO $$
             BEGIN
@@ -83,11 +80,11 @@ async def init_db(app):
             $$;
         """)
 
-        # гарантируем что главный админ всегда есть
+        # гарантируем наличие главного админа
         await conn.execute("""
             INSERT INTO admins (user_id)
             VALUES ($1)
-            ON CONFLICT (user_id) DO NOTHING
+            ON CONFLICT DO NOTHING
         """, MAIN_ADMIN_ID)
 
     await restore_jobs(app)
@@ -121,7 +118,7 @@ async def is_admin(user_id: int):
         return True
 
     async with db_pool.acquire() as conn:
-        admin = await conn.fetchrow(
+        admin = await conn.fetchval(
             "SELECT 1 FROM admins WHERE user_id=$1",
             user_id
         )
@@ -135,7 +132,7 @@ async def save_user(user_id: int):
         await conn.execute("""
             INSERT INTO users (user_id)
             VALUES ($1)
-            ON CONFLICT (user_id) DO NOTHING
+            ON CONFLICT DO NOTHING
         """, user_id)
 
 
@@ -178,6 +175,8 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ================= ADD ADMIN =================
+
 async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != MAIN_ADMIN_ID:
         return
@@ -186,23 +185,47 @@ async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Используй: /addadmin ID")
         return
 
-    new_admin = int(context.args[0])
+    try:
+        new_admin = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("❌ ID должен быть числом")
+        return
 
     async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO admins (user_id)
-            VALUES ($1)
-            ON CONFLICT DO NOTHING
-        """, new_admin)
+        exists = await conn.fetchval(
+            "SELECT 1 FROM admins WHERE user_id=$1",
+            new_admin
+        )
 
-    await update.message.reply_text(f"✅ Админ {new_admin} добавлен")
+        if exists:
+            await update.message.reply_text(
+                f"⚠️ Пользователь {new_admin} уже админ"
+            )
+            return
+
+        await conn.execute(
+            "INSERT INTO admins (user_id) VALUES ($1)",
+            new_admin
+        )
+
+    await update.message.reply_text(
+        f"✅ Админ {new_admin} добавлен"
+    )
+
+    # уведомление новому админу
+    try:
+        await context.bot.send_message(
+            new_admin,
+            "🎉 Вам выданы права администратора!"
+        )
+    except:
+        pass
 
 
 # ================= BUTTONS =================
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast
-    global waiting_for_schedule_text
+    global waiting_for_broadcast, waiting_for_schedule_text
 
     query = update.callback_query
     await query.answer()
@@ -216,9 +239,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "schedule":
         waiting_for_schedule_text = True
-        await query.message.reply_text(
-            "✍ Напиши текст для запланированной рассылки"
-        )
+        await query.message.reply_text("✍ Напиши текст для запланированной рассылки")
 
     elif query.data == "list":
         await show_schedules(query)
@@ -274,10 +295,7 @@ async def show_schedules(query):
 # ================= MESSAGES =================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast
-    global waiting_for_schedule_text
-    global waiting_for_schedule_time
-    global scheduled_text
+    global waiting_for_broadcast, waiting_for_schedule_text, waiting_for_schedule_time, scheduled_text
 
     user_id = update.effective_user.id
     await save_user(user_id)
