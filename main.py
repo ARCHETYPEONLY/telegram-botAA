@@ -19,6 +19,7 @@ ADMIN_ID = 963261169
 
 db = None
 waiting_for_broadcast = False
+waiting_for_funnel = False
 
 
 # ---------------- БАЗА ----------------
@@ -29,25 +30,8 @@ async def init_db(app):
     await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
-            joined_at TIMESTAMP DEFAULT NOW(),
-            funnel_step INTEGER DEFAULT 0,
-            funnel_active BOOLEAN DEFAULT TRUE
+            joined_at TIMESTAMP DEFAULT NOW()
         )
-    """)
-
-    await db.execute("""
-        ALTER TABLE users
-        ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT NOW()
-    """)
-
-    await db.execute("""
-        ALTER TABLE users
-        ADD COLUMN IF NOT EXISTS funnel_step INTEGER DEFAULT 0
-    """)
-
-    await db.execute("""
-        ALTER TABLE users
-        ADD COLUMN IF NOT EXISTS funnel_active BOOLEAN DEFAULT TRUE
     """)
 
     await db.execute("""
@@ -73,28 +57,6 @@ async def get_all_users():
     return [row["user_id"] for row in rows]
 
 
-async def get_users_count():
-    row = await db.fetchrow("SELECT COUNT(*) FROM users")
-    return row["count"]
-
-
-async def get_new_users_24h():
-    row = await db.fetchrow("""
-        SELECT COUNT(*) FROM users
-        WHERE joined_at >= NOW() - INTERVAL '24 HOURS'
-    """)
-    return row["count"]
-
-
-# ---------------- ПРОВЕРКА ПОДПИСКИ ----------------
-async def check_subscription(user_id, context):
-    try:
-        member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
-        return member.status in ["member", "administrator", "creator"]
-    except:
-        return False
-
-
 # ---------------- АВТОВОРОНКА ----------------
 async def start_funnel(user_id, context):
     rows = await db.fetch("""
@@ -116,98 +78,93 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await save_user(user_id)
 
-    is_subscribed = await check_subscription(user_id, context)
-
-    if is_subscribed:
-        await update.message.reply_text("ТЫ В БАНДЕ 🔥")
-        asyncio.create_task(start_funnel(user_id, context))
-    else:
-        keyboard = [
-            [InlineKeyboardButton(
-                "Подпишись уже, мы же там инфу кидаем))",
-                url=f"https://t.me/{CHANNEL_USERNAME[1:]}"
-            )],
-            [InlineKeyboardButton("✅ Давай проверим", callback_data="check_sub")]
-        ]
-
-        await update.message.reply_text(
-            "❌ Давай подписывайся, я все вижу)",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+    await update.message.reply_text("Добро пожаловать 🔥")
+    asyncio.create_task(start_funnel(user_id, context))
 
 
-# ---------------- СТАТИСТИКА ----------------
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    total = await get_users_count()
-    new_24h = await get_new_users_24h()
-
-    await update.message.reply_text(
-        f"📊 Статистика:\n\n"
-        f"👥 Всего: {total}\n"
-        f"🆕 Новых за 24 часа: {new_24h}"
-    )
-
-
-# ---------------- РАССЫЛКА ----------------
+# ---------------- АДМИН ПАНЕЛЬ ----------------
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
 
     keyboard = [
-        [InlineKeyboardButton("📢 Сделать рассылку", callback_data="broadcast")]
+        [InlineKeyboardButton("➕ Добавить шаг", callback_data="add_step")],
+        [InlineKeyboardButton("📋 Показать шаги", callback_data="show_steps")],
+        [InlineKeyboardButton("❌ Очистить воронку", callback_data="clear_funnel")],
     ]
 
     await update.message.reply_text(
-        "⚙ Админ панель",
+        "⚙ Управление автоворонкой",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
+# ---------------- КНОПКИ ----------------
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast
+    global waiting_for_funnel
 
     query = update.callback_query
     await query.answer()
 
-    if query.data == "check_sub":
-        is_subscribed = await check_subscription(query.from_user.id, context)
+    if query.from_user.id != ADMIN_ID:
+        return
 
-        if is_subscribed:
-            await query.edit_message_text("✅ Ну все, тусим! 🚀")
-            asyncio.create_task(start_funnel(query.from_user.id, context))
-        else:
-            await query.answer("❌ Так че, тусим то будем?", show_alert=True)
+    if query.data == "add_step":
+        waiting_for_funnel = True
+        await query.message.reply_text(
+            "Отправь шаг в формате:\n\n"
+            "номер_шага | задержка_в_секундах | текст\n\n"
+            "Пример:\n"
+            "1 | 10 | Привет, это первое сообщение"
+        )
 
-    if query.data == "broadcast" and query.from_user.id == ADMIN_ID:
-        waiting_for_broadcast = True
-        await query.message.reply_text("✍ Напиши текст для рассылки")
+    elif query.data == "show_steps":
+        rows = await db.fetch("""
+            SELECT step_number, delay_seconds, message
+            FROM funnel_steps
+            ORDER BY step_number
+        """)
+
+        if not rows:
+            await query.message.reply_text("Воронка пустая")
+            return
+
+        text = "📋 Текущие шаги:\n\n"
+        for row in rows:
+            text += f"Шаг {row['step_number']} | {row['delay_seconds']} сек\n{row['message']}\n\n"
+
+        await query.message.reply_text(text)
+
+    elif query.data == "clear_funnel":
+        await db.execute("DELETE FROM funnel_steps")
+        await query.message.reply_text("❌ Воронка очищена")
 
 
+# ---------------- ОБРАБОТКА ТЕКСТА ----------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast
+    global waiting_for_funnel
 
     user_id = update.effective_user.id
-    await save_user(user_id)
 
-    if user_id == ADMIN_ID and waiting_for_broadcast:
-        waiting_for_broadcast = False
-        text = update.message.text
+    if user_id == ADMIN_ID and waiting_for_funnel:
+        try:
+            step, delay, message = update.message.text.split("|", 2)
 
-        users = await get_all_users()
+            step = int(step.strip())
+            delay = int(delay.strip())
+            message = message.strip()
 
-        await update.message.reply_text("📢 Начинаю рассылку...")
+            await db.execute("""
+                INSERT INTO funnel_steps (step_number, delay_seconds, message)
+                VALUES ($1, $2, $3)
+            """, step, delay, message)
 
-        for uid in users:
-            try:
-                await context.bot.send_message(uid, text)
-                await asyncio.sleep(0.05)
-            except:
-                pass
+            await update.message.reply_text("✅ Шаг добавлен")
+            waiting_for_funnel = False
 
-        await update.message.reply_text("✅ Рассылка завершена")
+        except:
+            await update.message.reply_text("❌ Неверный формат. Попробуй ещё раз.")
+        return
 
 
 # ---------------- ЗАПУСК ----------------
@@ -215,7 +172,6 @@ app = ApplicationBuilder().token(TOKEN).post_init(init_db).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
-app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
