@@ -389,27 +389,21 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= RUN WEBHOOK =================
-
-app = (
-    ApplicationBuilder()
-    .token(TOKEN)
-    .post_init(init_db)
-    .build()
-)
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("admin", admin))
-app.add_handler(CommandHandler("stats", stats))
-app.add_handler(CallbackQueryHandler(button))
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-
-PORT = int(os.environ.get("PORT", 8000))
+# ================= WEBHOOK RUN =================
 
 print("🚀 Bot started (webhook mode)")
+
+PORT = int(os.environ.get("PORT", 8000))
+RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
+
+if not RAILWAY_URL:
+    raise RuntimeError("RAILWAY_STATIC_URL not set")
+
+WEBHOOK_URL = f"https://{RAILWAY_URL}/webhook"
 
 app.run_webhook(
     listen="0.0.0.0",
     port=PORT,
-    webhook_url=f"https://{RAILWAY_URL}/webhook",
+    webhook_url=WEBHOOK_URL,
 )
+
