@@ -21,7 +21,7 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-ADMIN_ID = 963261169  # ✅ ТВОЙ TELEGRAM ID
+ADMIN_ID = 963261169  # ✅ ТВОЙ ID
 
 db_pool = None
 
@@ -103,9 +103,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
-
-    if user_id != ADMIN_ID:
+    if query.from_user.id != ADMIN_ID:
         return
 
     if query.data == "broadcast":
@@ -128,7 +126,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await save_user(user_id)
 
-    # ОБЫЧНАЯ РАССЫЛКА
+    # ===== ОБЫЧНАЯ РАССЫЛКА =====
     if user_id == ADMIN_ID and waiting_for_broadcast:
         waiting_for_broadcast = False
         text = update.message.text
@@ -146,7 +144,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Рассылка завершена")
         return
 
-    # ШАГ 1 — текст
+    # ===== ШАГ 1 — текст =====
     if user_id == ADMIN_ID and waiting_for_schedule_text:
         scheduled_text = update.message.text
         waiting_for_schedule_text = False
@@ -158,18 +156,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ШАГ 2 — дата
+    # ===== ШАГ 2 — дата =====
     if user_id == ADMIN_ID and waiting_for_schedule_time:
         try:
             moscow = pytz.timezone("Europe/Moscow")
             send_time = datetime.strptime(update.message.text, "%d.%m.%Y %H:%M")
             send_time = moscow.localize(send_time)
 
+            now = datetime.now(moscow)
+            delay = (send_time - now).total_seconds()
+
+            if delay <= 0:
+                await update.message.reply_text("❌ Время уже прошло")
+                return
+
             waiting_for_schedule_time = False
 
             context.job_queue.run_once(
                 send_scheduled_broadcast,
-                when=send_time,
+                when=delay,
                 data=scheduled_text
             )
 
