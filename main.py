@@ -21,7 +21,7 @@ db = None
 
 
 # ---------- ПОДКЛЮЧЕНИЕ К БАЗЕ ----------
-async def init_db():
+async def init_db(app):
     global db
     db = await asyncpg.connect(DATABASE_URL)
 
@@ -34,13 +34,10 @@ async def init_db():
 
 # ---------- СОХРАНЕНИЕ ПОЛЬЗОВАТЕЛЯ ----------
 async def save_user(user_id):
-    try:
-        await db.execute(
-            "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
-            user_id
-        )
-    except:
-        pass
+    await db.execute(
+        "INSERT INTO users (user_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        user_id
+    )
 
 
 # ---------- ПОЛУЧИТЬ ВСЕХ ----------
@@ -69,7 +66,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ТЫ В БАНДЕ 🔥")
     else:
         keyboard = [
-            [InlineKeyboardButton("Подпишись", url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
+            [InlineKeyboardButton("Подпишись",
+                                  url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
             [InlineKeyboardButton("✅ Проверить", callback_data="check_sub")]
         ]
         await update.message.reply_text(
@@ -141,19 +139,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------- ЗАПУСК ----------
-async def main():
-    await init_db()
+app = ApplicationBuilder().token(TOKEN).post_init(init_db).build()
 
-    app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("admin", admin))
+app.add_handler(CallbackQueryHandler(button))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("Bot started")
-    await app.run_polling()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+print("Bot started")
+app.run_polling()
