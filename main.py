@@ -35,6 +35,10 @@ scheduled_text = None
 
 async def init_db(app):
     global db_pool
+
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL не найден в переменных Railway")
+
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     print("✅ Database connected")
 
@@ -48,6 +52,9 @@ async def init_db(app):
 
 
 async def save_user(user_id: int):
+    if not db_pool:
+        return
+
     async with db_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO users (user_id)
@@ -57,6 +64,9 @@ async def save_user(user_id: int):
 
 
 async def get_all_users():
+    if not db_pool:
+        return []
+
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id FROM users")
         return [row["user_id"] for row in rows]
@@ -102,7 +112,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_for_broadcast = True
         await query.message.reply_text("✍ Напиши текст для рассылки")
 
-    if query.data == "schedule":
+    elif query.data == "schedule":
         waiting_for_schedule_text = True
         await query.message.reply_text("✍ Напиши текст для запланированной рассылки")
 
@@ -189,7 +199,12 @@ async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
 
 # ================= RUN =================
 
-app = ApplicationBuilder().token(TOKEN).post_init(init_db).build()
+app = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .post_init(init_db)
+    .build()
+)
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
