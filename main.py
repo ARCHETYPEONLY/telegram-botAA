@@ -412,5 +412,4 @@ app.run_webhook(
     listen="0.0.0.0",
     port=PORT,
     webhook_url=f"https://{RAILWAY_URL}/webhook",
-    webhook_path="/webhook",
 )
