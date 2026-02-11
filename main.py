@@ -1,7 +1,7 @@
 import os
 import asyncio
 import asyncpg
-from datetime import datetime
+from datetime import datetime, timezone
 
 from telegram import (
     Update,
@@ -40,8 +40,6 @@ async def init_db(app):
     print("✅ Database connected")
 
     async with db_pool.acquire() as conn:
-
-        # USERS
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -49,24 +47,29 @@ async def init_db(app):
             )
         """)
 
-        # SCHEDULED
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id SERIAL PRIMARY KEY,
                 text TEXT NOT NULL,
-                send_time TIMESTAMP NOT NULL
+                send_time TIMESTAMP NOT NULL,
+                status TEXT DEFAULT 'scheduled'
             )
         """)
 
-        # AUTO MIGRATIONS
+        # Автомиграция если старой колонки нет
         await conn.execute("""
-            ALTER TABLE scheduled_messages
-            ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'scheduled'
-        """)
-
-        await conn.execute("""
-            ALTER TABLE scheduled_messages
-            ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='scheduled_messages'
+                    AND column_name='status'
+                ) THEN
+                    ALTER TABLE scheduled_messages
+                    ADD COLUMN status TEXT DEFAULT 'scheduled';
+                END IF;
+            END
+            $$;
         """)
 
     await restore_jobs(app)
@@ -77,17 +80,19 @@ async def restore_jobs(app):
         rows = await conn.fetch("""
             SELECT id, text, send_time
             FROM scheduled_messages
-            WHERE status = 'scheduled'
+            WHERE status='scheduled'
         """)
 
     for row in rows:
-        if row["send_time"] > datetime.utcnow():
+        send_time = row["send_time"].replace(tzinfo=timezone.utc)
+
+        if send_time > datetime.now(timezone.utc):
             job = app.job_queue.run_once(
                 send_scheduled_broadcast,
-                when=row["send_time"],
+                when=send_time,
                 data={
-                    "id": row["id"],
-                    "text": row["text"]
+                    "text": row["text"],
+                    "id": row["id"]
                 },
                 name=str(row["id"])
             )
@@ -116,7 +121,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚀 Бот работает")
 
 
-# ================= ADMIN =================
+# ================= ADMIN PANEL =================
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -133,6 +138,8 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+
+# ================= BUTTONS =================
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global waiting_for_broadcast
@@ -171,7 +178,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             job.schedule_removal()
             scheduled_jobs.pop(message_id, None)
 
-        await query.message.edit_text(f"❌ Рассылка ID {message_id} удалена")
+        await query.message.edit_text(
+            f"❌ Рассылка ID {message_id} удалена"
+        )
 
 
 # ================= SHOW LIST =================
@@ -181,7 +190,7 @@ async def show_schedules(query):
         rows = await conn.fetch("""
             SELECT id, text, send_time
             FROM scheduled_messages
-            WHERE status = 'scheduled'
+            WHERE status='scheduled'
             ORDER BY send_time
         """)
 
@@ -197,13 +206,12 @@ async def show_schedules(query):
             )]
         ]
 
-        preview = row["text"][:40]
-        time_str = row["send_time"].strftime("%d.%m.%Y %H:%M")
+        local_time = row["send_time"].strftime("%d.%m.%Y %H:%M")
 
         await query.message.reply_text(
             f"🆔 ID: {row['id']}\n"
-            f"🕒 {time_str}\n"
-            f"✉ {preview}",
+            f"🕒 {local_time}\n"
+            f"✉ {row['text'][:40]}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -219,7 +227,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await save_user(user_id)
 
-    # Обычная рассылка
     if user_id == ADMIN_ID and waiting_for_broadcast:
         waiting_for_broadcast = False
         text = update.message.text
@@ -237,7 +244,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Рассылка завершена")
         return
 
-    # Шаг 1
     if user_id == ADMIN_ID and waiting_for_schedule_text:
         scheduled_text = update.message.text
         waiting_for_schedule_text = False
@@ -249,7 +255,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Шаг 2
     if user_id == ADMIN_ID and waiting_for_schedule_time:
         try:
             send_time = datetime.strptime(
@@ -261,8 +266,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             async with db_pool.acquire() as conn:
                 row = await conn.fetchrow("""
-                    INSERT INTO scheduled_messages (text, send_time, status)
-                    VALUES ($1, $2, 'scheduled')
+                    INSERT INTO scheduled_messages (text, send_time)
+                    VALUES ($1, $2)
                     RETURNING id
                 """, scheduled_text, send_time)
 
@@ -270,10 +275,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             job = context.job_queue.run_once(
                 send_scheduled_broadcast,
-                when=send_time,
+                when=send_time.replace(tzinfo=timezone.utc),
                 data={
-                    "id": message_id,
-                    "text": scheduled_text
+                    "text": scheduled_text,
+                    "id": message_id
                 },
                 name=str(message_id)
             )
@@ -316,6 +321,33 @@ async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
     scheduled_jobs.pop(message_id, None)
 
 
+# ================= STATS =================
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    async with db_pool.acquire() as conn:
+        users_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM users"
+        )
+
+        scheduled_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM scheduled_messages WHERE status='scheduled'"
+        )
+
+        sent_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM scheduled_messages WHERE status='sent'"
+        )
+
+    await update.message.reply_text(
+        f"📊 Статистика\n\n"
+        f"👥 Пользователей: {users_count}\n"
+        f"🕒 Запланировано: {scheduled_count}\n"
+        f"✅ Отправлено: {sent_count}"
+    )
+
+
 # ================= RUN =================
 
 app = (
@@ -327,8 +359,10 @@ app = (
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
+app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 print("🚀 Bot started")
 app.run_polling()
+
