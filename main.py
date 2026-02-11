@@ -19,6 +19,15 @@ from telegram.ext import (
 
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+from datetime import datetime, timezone
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    ApplicationBuilder,
 RAILWAY_URL = os.getenv("RAILWAY_STATIC_URL")
 
 ADMIN_ID = 963261169  # <-- ТВОЙ ID
@@ -404,9 +413,6 @@ app.add_handler(CommandHandler("stats", stats))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-
-# ================= WEBHOOK RUN =================
-
 print("🚀 Bot started (webhook mode)")
 
 PORT = int(os.environ.get("PORT", 8000))
@@ -420,5 +426,7 @@ WEBHOOK_URL = f"https://{RAILWAY_URL}/webhook"
 app.run_webhook(
     listen="0.0.0.0",
     port=PORT,
+    url_path="webhook",
     webhook_url=WEBHOOK_URL,
 )
+
