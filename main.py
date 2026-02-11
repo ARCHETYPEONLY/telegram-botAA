@@ -20,7 +20,7 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# 👑 Главный админ (никогда не удаляется)
+# 🔥 ТВОЙ ГЛАВНЫЙ АДМИН
 MAIN_ADMIN_ID = 963261169
 
 db_pool = None
@@ -50,12 +50,6 @@ async def init_db(app):
         """)
 
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS admins (
-                user_id BIGINT PRIMARY KEY
-            )
-        """)
-
-        await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id SERIAL PRIMARY KEY,
                 text TEXT NOT NULL,
@@ -64,7 +58,7 @@ async def init_db(app):
             )
         """)
 
-        # автомиграция status если таблица старая
+        # автомиграция если status нет
         await conn.execute("""
             DO $$
             BEGIN
@@ -79,13 +73,6 @@ async def init_db(app):
             END
             $$;
         """)
-
-        # гарантируем наличие главного админа
-        await conn.execute("""
-            INSERT INTO admins (user_id)
-            VALUES ($1)
-            ON CONFLICT DO NOTHING
-        """, MAIN_ADMIN_ID)
 
     await restore_jobs(app)
 
@@ -111,20 +98,6 @@ async def restore_jobs(app):
             scheduled_jobs[row["id"]] = job
 
 
-# ================= ADMIN CHECK =================
-
-async def is_admin(user_id: int):
-    if user_id == MAIN_ADMIN_ID:
-        return True
-
-    async with db_pool.acquire() as conn:
-        admin = await conn.fetchval(
-            "SELECT 1 FROM admins WHERE user_id=$1",
-            user_id
-        )
-        return admin is not None
-
-
 # ================= USERS =================
 
 async def save_user(user_id: int):
@@ -132,7 +105,7 @@ async def save_user(user_id: int):
         await conn.execute("""
             INSERT INTO users (user_id)
             VALUES ($1)
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (user_id) DO NOTHING
         """, user_id)
 
 
@@ -149,18 +122,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🚀 Бот работает")
 
 
-async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admin_status = await is_admin(update.effective_user.id)
-    await update.message.reply_text(
-        f"Ваш ID: {update.effective_user.id}\n"
-        f"Админ: {admin_status}"
-    )
-
-
 # ================= ADMIN PANEL =================
 
+def is_admin(user_id: int):
+    return user_id == MAIN_ADMIN_ID
+
+
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id):
+    if not is_admin(update.effective_user.id):
         return
 
     keyboard = [
@@ -175,62 +144,16 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================= ADD ADMIN =================
-
-async def add_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != MAIN_ADMIN_ID:
-        return
-
-    if not context.args:
-        await update.message.reply_text("Используй: /addadmin ID")
-        return
-
-    try:
-        new_admin = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("❌ ID должен быть числом")
-        return
-
-    async with db_pool.acquire() as conn:
-        exists = await conn.fetchval(
-            "SELECT 1 FROM admins WHERE user_id=$1",
-            new_admin
-        )
-
-        if exists:
-            await update.message.reply_text(
-                f"⚠️ Пользователь {new_admin} уже админ"
-            )
-            return
-
-        await conn.execute(
-            "INSERT INTO admins (user_id) VALUES ($1)",
-            new_admin
-        )
-
-    await update.message.reply_text(
-        f"✅ Админ {new_admin} добавлен"
-    )
-
-    # уведомление новому админу
-    try:
-        await context.bot.send_message(
-            new_admin,
-            "🎉 Вам выданы права администратора!"
-        )
-    except:
-        pass
-
-
 # ================= BUTTONS =================
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast, waiting_for_schedule_text
+    global waiting_for_broadcast
+    global waiting_for_schedule_text
 
     query = update.callback_query
     await query.answer()
 
-    if not await is_admin(query.from_user.id):
+    if not is_admin(query.from_user.id):
         return
 
     if query.data == "broadcast":
@@ -295,14 +218,18 @@ async def show_schedules(query):
 # ================= MESSAGES =================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast, waiting_for_schedule_text, waiting_for_schedule_time, scheduled_text
+    global waiting_for_broadcast
+    global waiting_for_schedule_text
+    global waiting_for_schedule_time
+    global scheduled_text
 
     user_id = update.effective_user.id
     await save_user(user_id)
 
-    if not await is_admin(user_id):
+    if not is_admin(user_id):
         return
 
+    # обычная рассылка
     if waiting_for_broadcast:
         waiting_for_broadcast = False
         text = update.message.text
@@ -320,6 +247,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Готово")
         return
 
+    # шаг 1
     if waiting_for_schedule_text:
         scheduled_text = update.message.text
         waiting_for_schedule_text = False
@@ -327,6 +255,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🕒 Введи дату: 11.02.2026 19:30")
         return
 
+    # шаг 2
     if waiting_for_schedule_time:
         try:
             send_time = datetime.strptime(
@@ -385,7 +314,7 @@ async def send_scheduled_broadcast(context: ContextTypes.DEFAULT_TYPE):
 # ================= STATS =================
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update.effective_user.id):
+    if not is_admin(update.effective_user.id):
         return
 
     async with db_pool.acquire() as conn:
@@ -417,8 +346,6 @@ app = (
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("admin", admin))
 app.add_handler(CommandHandler("stats", stats))
-app.add_handler(CommandHandler("whoami", whoami))
-app.add_handler(CommandHandler("addadmin", add_admin))
 app.add_handler(CallbackQueryHandler(button))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
