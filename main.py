@@ -1,31 +1,18 @@
 import os
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-TOKEN = os.getenv("BOT_TOKEN")
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Бот работает 24/7 🚀")
-
-app = ApplicationBuilder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-
-print("Bot started")
-app.run_polling()
-
-import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 
 TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_USERNAME = "@ECLIPSEPARTY1"  # <-- замени на свой канал
+CHANNEL_USERNAME = "@ECLIPSEPARTY1"
 
 # Проверка подписки
 async def check_subscription(user_id, context):
     try:
         member = await context.bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        print("STATUS:", member.status)
         return member.status in ["member", "administrator", "creator"]
-    except:
+    except Exception as e:
+        print("ERROR:", e)
         return False
 
 # Команда старт
@@ -35,7 +22,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_subscribed = await check_subscription(user_id, context)
 
     if is_subscribed:
-        await update.message.reply_text("ТЫ В БАНДЕ")
+        await update.message.reply_text("ТЫ В БАНДЕ 🔥")
     else:
         keyboard = [
             [InlineKeyboardButton("📢 Подписаться", url=f"https://t.me/{CHANNEL_USERNAME[1:]}")],
@@ -57,9 +44,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_subscribed = await check_subscription(user_id, context)
 
     if is_subscribed:
-        await query.edit_message_text("✅ СПАСИБО ЧТО ВСТУПИЛ, ДАВАЙ ТУСИТЬ!🚀")
+        await query.edit_message_text("✅ СПАСИБО ЧТО ВСТУПИЛ, ДАВАЙ ТУСИТЬ! 🚀")
     else:
-        await query.answer("❌ТЫ НЕ ХОЧЕШЬ ПРИНЯТЬ УЧАСТИЕ В ТАКОЙ ТУСОВКЕ?", show_alert=True)
+        await query.answer("❌ ТЫ НЕ ПОДПИСАН!", show_alert=True)
 
 app = ApplicationBuilder().token(TOKEN).build()
 
