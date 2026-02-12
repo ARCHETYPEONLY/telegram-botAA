@@ -298,6 +298,80 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Пользователей: {users}"
     )
 
+# ================= MESSAGE HANDLER =================
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global waiting_for_broadcast
+
+    user = update.effective_user
+    message = update.message
+
+    await save_user(user)
+
+    # ===== РЕГИСТРАЦИЯ =====
+    if user.id in waiting_for_name:
+        full_name = message.text.strip()
+
+        if len(full_name.split()) < 2:
+            await message.reply_text("❌ Введи фамилию и имя")
+            return
+
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users
+                SET full_name=$1
+                WHERE user_id=$2
+            """, full_name, user.id)
+
+        keyboard = [
+            [InlineKeyboardButton(
+                "📢 Подписаться",
+                url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}"
+            )],
+            [InlineKeyboardButton(
+                "✅ Проверить подписку",
+                callback_data="check_sub"
+            )]
+        ]
+
+        await message.reply_text(
+            "Ура! ты практически в списке 🎉\n\n"
+            "Подпишись на канал и нажми проверить 👇",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    # ===== АДМИН РАССЫЛКА =====
+    if user.id == ADMIN_ID and waiting_for_broadcast:
+        waiting_for_broadcast = False
+        users = await get_all_users()
+
+        for uid in users:
+            try:
+                await context.bot.copy_message(
+                    uid,
+                    message.chat.id,
+                    message.message_id
+                )
+                await asyncio.sleep(0.05)
+            except:
+                pass
+
+        await message.reply_text("✅ Рассылка завершена")
+        return
+
+    # ===== СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ АДМИНУ =====
+    if user.id != ADMIN_ID:
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"📩 Новое сообщение\nID: {user.id}\nUsername: @{user.username}"
+        )
+
+        await context.bot.forward_message(
+            ADMIN_ID,
+            update.effective_chat.id,
+            message.message_id
+        )
 # ================= APP INIT =================
 
 app = (
