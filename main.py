@@ -133,9 +133,23 @@ async def check_subscription(user_id, context):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await save_user(user)
 
-    logger.debug(f"User {user.id} started the bot.")
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT full_name FROM users WHERE user_id=$1",
+            user.id
+        )
+
+    # если пользователь уже зарегистрирован
+    if existing and existing["full_name"]:
+        await update.message.reply_text(
+            "✅ Ты уже зарегистрирован!\n\n"
+            "Вся информация публикуется в канале 😉"
+        )
+        return
+
+    # если первый раз
+    await save_user(user)
 
     waiting_for_name[user.id] = True
 
@@ -143,6 +157,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Привет!\n\n"
         "Для того чтобы попасть в список, напиши фамилию и имя 👇"
     )
+
 
 # ================= ADMIN =================
 
