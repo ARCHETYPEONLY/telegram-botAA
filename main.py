@@ -133,30 +133,9 @@ async def check_subscription(user_id, context):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-
-    async with db_pool.acquire() as conn:
-        existing = await conn.fetchrow(
-            "SELECT full_name FROM users WHERE user_id=$1",
-            user.id
-        )
-
-    # если пользователь уже зарегистрирован
-    if existing and existing["full_name"]:
-        await update.message.reply_text(
-            "✅ Ты уже зарегистрирован!\n\n"
-            "Вся информация публикуется в канале 😉"
-        )
-        return
-
-    # если первый раз
     await save_user(user)
 
-    waiting_for_name[user.id] = True
-
-    await update.message.reply_text(
-        "Привет!\n\n"
-        "Для того чтобы попасть в список, напиши фамилию и имя 👇"
-    )
+    await send_start_menu(update)
 
 
 # ================= ADMIN =================
@@ -184,6 +163,24 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    # ===== СТАРТОВОЕ МЕНЮ =====
+if query.data == "register":
+    waiting_for_name[query.from_user.id] = True
+
+    await query.message.edit_text(
+        "📝 Введи фамилию и имя, чтобы попасть в список 👇"
+    )
+    return
+
+if query.data == "info":
+    await query.answer()
+    await query.message.reply_text(
+        "ℹ Информация:\n\n"
+        "Все детали публикуются в канале.\n"
+        "После регистрации не забудь подписаться 😉"
+    )
+    return
+    
     # ===== ПРОВЕРКА ПОДПИСКИ =====
     if query.data == "check_sub":
         user_id = query.from_user.id
@@ -387,6 +384,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_chat.id,
             message.message_id
         )
+
+async def send_start_menu(update: Update):
+    keyboard = [
+        [InlineKeyboardButton("📝 Зарегистрироваться", callback_data="register")],
+        [InlineKeyboardButton("ℹ Информация", callback_data="info")],
+        [InlineKeyboardButton("📢 Наш канал", url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}")]
+    ]
+
+    await update.message.reply_text(
+        "🎉 Добро пожаловать!\n\n"
+        "Выбери действие ниже 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 # ================= APP INIT =================
 
 app = (
