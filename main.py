@@ -169,46 +169,45 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    logger.debug(f"Button pressed: {query.data} by {query.from_user.id}")
+    # ===== ПРОВЕРКА ПОДПИСКИ =====
+    if query.data == "check_sub":
+        user_id = query.from_user.id
+        is_subscribed = await check_subscription(user_id, context)
 
- if query.data == "check_sub":
-    user_id = query.from_user.id
-    is_subscribed = await check_subscription(user_id, context)
+        if not is_subscribed:
+            await query.answer("❌ Ты ещё не подписан", show_alert=True)
+            return
 
-    if not is_subscribed:
-        await query.answer("❌ Ты ещё не подписан", show_alert=True)
-        return
+        # получаем ФИО из базы
+        async with db_pool.acquire() as conn:
+            full_name = await conn.fetchval(
+                "SELECT full_name FROM users WHERE user_id=$1",
+                user_id
+            )
 
-    # получаем ФИО из базы
-    async with db_pool.acquire() as conn:
-        full_name = await conn.fetchval(
-            "SELECT full_name FROM users WHERE user_id=$1",
-            user_id
+        waiting_for_name.pop(user_id, None)
+
+        await query.message.edit_text(
+            "🔥 Ты в списке!\n\n"
+            "Вся информация будет в канале 😉"
         )
 
-    waiting_for_name.pop(user_id, None)
+        # уведомление админу
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"🆕 Новая регистрация\n\n"
+            f"👤 ФИО: {full_name}\n"
+            f"🆔 ID: {user_id}\n"
+            f"Username: @{query.from_user.username or 'нет'}"
+        )
 
-    # сообщение пользователю
-    await query.message.edit_text(
-        "🔥 Ты в списке!\n\n"
-        "Вся информация будет в канале 😉"
-    )
+        return
 
-    # уведомление админу
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"🆕 Новая регистрация\n\n"
-        f"👤 ФИО: {full_name}\n"
-        f"🆔 ID: {user_id}\n"
-        f"Username: @{query.from_user.username or 'нет'}"
-    )
-
-    return
-   
-
+    # ===== ЕСЛИ НЕ АДМИН — ВЫХОД =====
     if query.from_user.id != ADMIN_ID:
         return
 
+    # ===== АДМИН КНОПКИ =====
     if query.data == "broadcast":
         waiting_for_broadcast = True
         await query.message.reply_text("Отправь контент для рассылки")
@@ -216,17 +215,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "schedule":
         waiting_for_schedule_text = True
         await query.message.reply_text("Отправь контент для планирования")
-
-# ================= MESSAGE HANDLER =================
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast, waiting_for_schedule_text
-    global waiting_for_schedule_time, scheduled_content
-
-    user = update.effective_user
-    message = update.message
-
-    await save_user(user)
 
     # ===== РЕГИСТРАЦИЯ =====
     if user.id in waiting_for_name:
