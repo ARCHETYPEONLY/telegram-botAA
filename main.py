@@ -135,7 +135,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     await save_user(user)
 
-    await send_start_menu(update)
+    keyboard = [
+        [InlineKeyboardButton("📝 Зарегистрироваться", callback_data="register")],
+        [InlineKeyboardButton("ℹ Информация", callback_data="info")],
+        [InlineKeyboardButton("📢 Наш канал", url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}")]
+    ]
+
+    await update.message.reply_text(
+        "🎉 Добро пожаловать!\n\n"
+        "Выбери действие ниже 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
 # ================= ADMIN =================
@@ -158,39 +168,39 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= BUTTONS =================
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global waiting_for_broadcast, waiting_for_schedule_text
+    global waiting_for_broadcast
 
     query = update.callback_query
     await query.answer()
 
-    # ===== СТАРТОВОЕ МЕНЮ =====
-if query.data == "register":
-    waiting_for_name[query.from_user.id] = True
+    user_id = query.from_user.id
 
-    await query.message.edit_text(
-        "📝 Введи фамилию и имя, чтобы попасть в список 👇"
-    )
-    return
+    # ===== РЕГИСТРАЦИЯ ИЗ МЕНЮ =====
+    if query.data == "register":
+        waiting_for_name[user_id] = True
 
-if query.data == "info":
-    await query.answer()
-    await query.message.reply_text(
-        "ℹ Информация:\n\n"
-        "Все детали публикуются в канале.\n"
-        "После регистрации не забудь подписаться 😉"
-    )
-    return
-    
+        await query.message.edit_text(
+            "📝 Введи фамилию и имя, чтобы попасть в список 👇"
+        )
+        return
+
+    # ===== ИНФОРМАЦИЯ =====
+    if query.data == "info":
+        await query.message.reply_text(
+            "ℹ Информация:\n\n"
+            "Все детали публикуются в канале.\n"
+            "После регистрации не забудь подписаться 😉"
+        )
+        return
+
     # ===== ПРОВЕРКА ПОДПИСКИ =====
     if query.data == "check_sub":
-        user_id = query.from_user.id
         is_subscribed = await check_subscription(user_id, context)
 
         if not is_subscribed:
             await query.answer("❌ Ты ещё не подписан", show_alert=True)
             return
 
-        # получаем ФИО из базы
         async with db_pool.acquire() as conn:
             full_name = await conn.fetchval(
                 "SELECT full_name FROM users WHERE user_id=$1",
@@ -215,52 +225,14 @@ if query.data == "info":
 
         return
 
-    # ===== ЕСЛИ НЕ АДМИН — ВЫХОД =====
-    if query.from_user.id != ADMIN_ID:
+    # ===== АДМИН =====
+    if user_id != ADMIN_ID:
         return
 
-    # ===== АДМИН КНОПКИ =====
     if query.data == "broadcast":
         waiting_for_broadcast = True
         await query.message.reply_text("Отправь контент для рассылки")
 
-    elif query.data == "schedule":
-        waiting_for_schedule_text = True
-        await query.message.reply_text("Отправь контент для планирования")
-
-    # ===== РЕГИСТРАЦИЯ =====
-    if user.id in waiting_for_name:
-        full_name = message.text.strip()
-
-        if len(full_name.split()) < 2:
-            await message.reply_text("❌ Введи фамилию и имя")
-            return
-
-        async with db_pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE users
-                SET full_name=$1
-                WHERE user_id=$2
-            """, full_name, user.id)
-
-        keyboard = [
-            [InlineKeyboardButton(
-                "📢 Подписаться",
-                url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}"
-            )],
-            [InlineKeyboardButton(
-                "✅ Проверить подписку",
-                callback_data="check_sub"
-            )]
-        ]
-
-        await message.reply_text(
-            "Ура! ты практически в списке 🎉\n\n"
-            "Подпишись на канал и нажми проверить 👇",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        return
 
     # ===== АДМИН =====
     if user.id == ADMIN_ID:
